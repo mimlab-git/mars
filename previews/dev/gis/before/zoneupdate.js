@@ -268,8 +268,23 @@ function rectsClash(a, b, gap) {
  * the first that fits at full size. If none does, it keeps the position
  * that fitted the largest rectangle, so a cramped zone yields a smaller
  * building rather than nothing.
+ *
+ * An optional `anchor` ("N"/"S"/"E"/"W") re-sorts the candidates so the
+ * search starts from that side of the zone, depth as tiebreak within a
+ * grid row. A mirofish negotiation fixes WHERE height goes (low toward
+ * 종묘, high toward 청계천), and without a side preference the tallest
+ * mass lands wherever the block is deepest. The full-size-first /
+ * best-area fallback is unchanged: an anchor with no room still reports
+ * a shortfall instead of forcing the position.
  */
-function placeMass(ring, targetArea, aspect, inset, placed, gap) {
+const ANCHOR_SCORE = {
+  N: (c) => c.y,
+  S: (c) => -c.y,
+  E: (c) => c.x,
+  W: (c) => -c.x,
+};
+
+function placeMass(ring, targetArea, aspect, inset, placed, gap, anchor) {
   const b = bounds(ring);
   const N = 34;
 
@@ -284,7 +299,12 @@ function placeMass(ring, targetArea, aspect, inset, placed, gap) {
       candidates.push({ x, y, depth });
     }
   }
-  candidates.sort((p, q) => q.depth - p.depth);
+  const score = ANCHOR_SCORE[anchor];
+  candidates.sort(
+    score
+      ? (p, q) => score(q) - score(p) || q.depth - p.depth
+      : (p, q) => q.depth - p.depth,
+  );
 
   let best = null;
   for (const c of candidates) {
@@ -371,6 +391,7 @@ export function generateMassing(zone, config) {
         setback,
         occupied,
         MASS_GAP_M,
+        entry.anchor,
       );
       if (!spot) {
         massReports.push({

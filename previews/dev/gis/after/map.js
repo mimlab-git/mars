@@ -1,6 +1,6 @@
 // Map creation, world terrain, and camera helpers.
 
-import { BASEMAP_STYLE, CAMERA, TERRAIN_TILES } from "./config.js";
+import { BASEMAP_STYLE, CAMERA, CINEMATIC, COLORS, TERRAIN_TILES } from "./config.js";
 
 /** Create the map and wait until its style has loaded. */
 export async function createMap(container = "map") {
@@ -29,7 +29,7 @@ export async function createMap(container = "map") {
 /** Camera views from scripts/views.json, keyed by name. */
 export async function loadViews() {
   try {
-    const res = await fetch(globalThis.__MIMLAB_GIS_VIEWS_URL__ ?? "/views.json");
+    const res = await fetch(new URL("./views.json", import.meta.url));
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const views = await res.json();
     // `_note` and friends are documentation, not views.
@@ -40,6 +40,43 @@ export async function loadViews() {
     console.warn(`views.json unavailable (${err.message})`);
     return {};
   }
+}
+
+/** OSM surround layers to tone down; ids match swap.js. */
+const SURROUND_LAYERS = ["osm-outside", "osm-straddle"];
+
+/**
+ * Atmosphere, sun, and a desaturated surround - on or off.
+ *
+ * Off restores the values the layers were built with rather than deleting
+ * the properties: MapLibre treats a removed paint property as "use the
+ * spec default", which for fill-extrusion-opacity is 1, not the 0.55
+ * swap.js chose. Reading them back at first use would work too, but the
+ * constants are already the single source for this look.
+ *
+ * Returns the state actually applied, so a caller can report it rather
+ * than assume it.
+ */
+export function applyCinematic(map, on) {
+  map.setSky(on ? CINEMATIC.sky : {});
+  map.setLight(
+    on ? CINEMATIC.light : { anchor: "viewport", position: [1.15, 210, 30] },
+  );
+
+  for (const id of SURROUND_LAYERS) {
+    if (!map.getLayer(id)) continue;
+    map.setPaintProperty(
+      id,
+      "fill-extrusion-color",
+      on ? CINEMATIC.surroundColor : COLORS.osm,
+    );
+    map.setPaintProperty(
+      id,
+      "fill-extrusion-opacity",
+      on ? CINEMATIC.surroundOpacity : 0.55,
+    );
+  }
+  return on;
 }
 
 /**

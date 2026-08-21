@@ -44,14 +44,41 @@ export const AREA = (() => {
 /** Metres per storey. NGII gives floor counts, not heights. */
 export const DEFAULT_FLOOR_HEIGHT = 4.0;
 
-// Centred on the sheet grid, pulled back far enough to see the whole of
-// it. The previous framing was built around the old test rectangle and
-// opened looking at one corner of the data.
+/**
+ * Metres per storey BY USE, for Track B, where the storey height is not a
+ * slider but a property of what the building is. Keys are NGII vocabulary,
+ * matching COLORS.byUse.
+ *
+ * Grounded in common floor-to-floor practice rather than any single code
+ * (Korean building law sets no per-use storey height): Korean apartments
+ * run 2.8-3.0 m floor-to-floor; offices 3.6-4.2 m to carry services above
+ * a 2.7 m ceiling; retail 4.5 m and up. Everything else is interpolated
+ * from those anchors. `_default` covers uses outside the table (창고 etc.)
+ * and buildings with no use at all.
+ */
+export const USE_STOREY_M = {
+  주택: 3.0,
+  공동주택: 2.9,
+  숙박시설: 3.2,
+  교육연구시설: 3.6,
+  근린생활시설: 3.8,
+  업무시설: 4.0,
+  기타시설: 3.5,
+  자동차관련시설: 3.5,
+  종교시설: 4.5,
+  판매시설: 4.5,
+  문화및집회시설: 5.0,
+  _default: 3.5,
+};
+
+// Site-scoped fallback camera. Track B used to inherit Track A's full
+// nine-sheet view at zoom 12.6, then jump to the Seun zones after loading.
+// Starting here avoids both the visible zoom jump and unnecessary tiles.
 export const CAMERA = {
-  center: [126.99655, 37.5687],
-  zoom: 16.7,
-  pitch: 58,
-  bearing: -18,
+  center: [126.99532, 37.56587],
+  zoom: 15.76,
+  pitch: 55,
+  bearing: -15,
   maxPitch: 85,
 };
 
@@ -102,6 +129,43 @@ export const COLORS = {
     "문화및집회시설",
     "숙박시설",
   ],
+};
+
+/**
+ * Cinematic styling: atmosphere, sun, and a toned-down surround.
+ *
+ * A toggle, never the default. The analysis view's flat lighting and full
+ * basemap saturation are what the verification workflow measures against,
+ * and the counts in a screenshot have to stay readable. This exists to
+ * produce the BASE IMAGE for the render pipeline's later AI pass, where
+ * what matters is that the massing reads clearly and the surround does
+ * not compete with it.
+ *
+ * The sun sits south-west at a low winter angle: it puts the lit face of
+ * a 종묘-facing mass toward the camera in the standard comparison views,
+ * and long shadows are what make a massing model read as built rather
+ * than as a diagram.
+ */
+export const CINEMATIC = {
+  sky: {
+    "sky-color": "#8fb8e0",
+    "horizon-color": "#e8d5c0",
+    "fog-color": "#dfe6ee",
+    "sky-horizon-blend": 0.6,
+    "horizon-fog-blend": 0.5,
+    "fog-ground-blend": 0.1,
+    "atmosphere-blend": 0.7,
+  },
+  light: {
+    anchor: "map",
+    // MapLibre's azimuth is degrees clockwise from north (map anchor).
+    position: [1.5, 225, 55],
+    color: "#fff4e0",
+    intensity: 0.45,
+  },
+  /** OSM surround, desaturated so our massing carries the frame. */
+  surroundColor: "#c3c7cc",
+  surroundOpacity: 0.85,
 };
 
 /**

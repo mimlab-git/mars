@@ -96,29 +96,6 @@ function centroidOf(geometry) {
   return n ? [sx / n, sy / n] : [0, 0];
 }
 
-/** Cheap rejection box before the more expensive point-in-polygon test. */
-function boundsOf(geometry) {
-  const polys =
-    geometry.type === "MultiPolygon"
-      ? geometry.coordinates
-      : [geometry.coordinates];
-  let west = Infinity;
-  let south = Infinity;
-  let east = -Infinity;
-  let north = -Infinity;
-  for (const poly of polys) {
-    for (const ring of poly) {
-      for (const [lon, lat] of ring) {
-        west = Math.min(west, lon);
-        south = Math.min(south, lat);
-        east = Math.max(east, lon);
-        north = Math.max(north, lat);
-      }
-    }
-  }
-  return [west, south, east, north];
-}
-
 export class Zones {
   constructor(map) {
     this.map = map;
@@ -127,7 +104,7 @@ export class Zones {
   }
 
   async load() {
-    const res = await fetch("./zones.geojson");
+    const res = await fetch(new URL("../data/zones.geojson", import.meta.url));
     if (!res.ok) throw new Error(`zones.geojson: HTTP ${res.status}`);
     this.data = await res.json();
     return this.data.features.length;
@@ -233,7 +210,6 @@ export class Zones {
         id: ZONE_HIGHLIGHT_LAYER,
         type: "fill-extrusion",
         source: "ngii",
-        "source-layer": "buildings",
         filter: ["==", ["get", "zone_fid"], -1],
         paint: {
           "fill-extrusion-color": "#ffd24a",
@@ -246,24 +222,30 @@ export class Zones {
   }
 
   /** Point the highlight at one zone's buildings, or clear it with null. */
-  highlightBuildings(fid, buildingIds = []) {
+  highlightBuildings(fid) {
     if (!this.map.getLayer(ZONE_HIGHLIGHT_LAYER)) return;
-    this.map.setFilter(
-      ZONE_HIGHLIGHT_LAYER,
-      fid === null || buildingIds.length === 0
-        ? ["==", ["id"], -1]
-        : ["in", ["id"], ["literal", buildingIds]],
-    );
+    this.map.setFilter(ZONE_HIGHLIGHT_LAYER, [
+      "==",
+      ["get", "zone_fid"],
+      fid === null ? -1 : fid,
+    ]);
   }
 
-  /** Highlighted buildings actually DRAWN, which is not what was asked for. */
+  /**
+   * Highlighted buildings actually DRAWN, which is not what was asked for.
+   *
+   * Box starts below the top edge for the same reason as
+   * buildings.drawnCount: past ~70 degrees of pitch a box touching y=0
+   * spans the horizon and returns nothing at all.
+   */
   highlightDrawnCount() {
     const c = this.map.getCanvas();
     if (!this.map.getLayer(ZONE_HIGHLIGHT_LAYER)) return 0;
+    const h = c.clientHeight;
     return this.map.queryRenderedFeatures(
       [
-        [0, 0],
-        [c.clientWidth, c.clientHeight],
+        [0, Math.round(h * 0.05)],
+        [c.clientWidth, h],
       ],
       { layers: [ZONE_HIGHLIGHT_LAYER] },
     ).length;
@@ -297,18 +279,12 @@ export class Zones {
    */
   tagBuildings(features) {
     let tagged = 0;
-    const indexedZones = this.data.features.map((zone) => ({
-      zone,
-      bounds: boundsOf(zone.geometry),
-    }));
     for (const f of features) {
       const [lon, lat] = centroidOf(f.geometry);
       let fid = null;
-      for (const { zone, bounds } of indexedZones) {
-        const [west, south, east, north] = bounds;
-        if (lon < west || lon > east || lat < south || lat > north) continue;
-        if (pointInPolygon(lon, lat, zone.geometry)) {
-          fid = zone.id;
+      for (const z of this.data.features) {
+        if (pointInPolygon(lon, lat, z.geometry)) {
+          fid = z.id;
           break; // One zone by construction; the first hit is the only hit.
         }
       }
@@ -326,7 +302,7 @@ export class Zones {
   }
 
   /** Highlight one zone by fid, or clear with null. Returns its properties. */
-  select(fid, buildingIds = []) {
+  select(fid) {
     if (this.selected !== null) {
       this.map.setFeatureState(
         { source: SOURCE, id: this.selected },
@@ -337,7 +313,7 @@ export class Zones {
       this.map.setFeatureState({ source: SOURCE, id: fid }, { selected: true });
     }
     this.selected = fid;
-    this.highlightBuildings(fid, buildingIds);
+    this.highlightBuildings(fid);
     return fid === null ? null : this.get(fid);
   }
 
@@ -368,28 +344,20 @@ export class Zones {
     return this.data?.features.length ?? 0;
   }
 
-  /** Bounding box enclosing every planning zone. */
-  bounds(padding = 0) {
-    if (!this.data?.features.length) return null;
-    const boxes = this.data.features.map((feature) => boundsOf(feature.geometry));
-    return [
-      Math.min(...boxes.map((box) => box[0])) - padding,
-      Math.min(...boxes.map((box) => box[1])) - padding,
-      Math.max(...boxes.map((box) => box[2])) + padding,
-      Math.max(...boxes.map((box) => box[3])) + padding,
-    ];
-  }
-
-  /** Zones currently drawn on screen, which is not the same as loaded. */
+  /**
+   * Zones currently drawn on screen, which is not the same as loaded.
+   * Top strip trimmed - see highlightDrawnCount.
+   */
   drawnCount() {
     const c = this.map.getCanvas();
     if (!this.map.getLayer(ZONE_FILL_LAYER)) return 0;
+    const h = c.clientHeight;
     const seen = new Set(
       this.map
         .queryRenderedFeatures(
           [
-            [0, 0],
-            [c.clientWidth, c.clientHeight],
+            [0, Math.round(h * 0.05)],
+            [c.clientWidth, h],
           ],
           { layers: [ZONE_FILL_LAYER] },
         )

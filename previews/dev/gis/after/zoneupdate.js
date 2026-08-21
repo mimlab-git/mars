@@ -406,8 +406,6 @@ export function generateMassing(zone, config) {
       const rect = spot.rect;
       occupied.push(spot.box);
       seq += 1;
-      const storeyHeight = entry.storey_height ?? STOREY_M;
-      const footprintArea = Math.round(rect.area);
       features.push({
         type: "Feature",
         id: `zu-${zone.id}-${seq}`,
@@ -415,16 +413,10 @@ export function generateMassing(zone, config) {
           // NGII's own vocabulary, so 용도별 색상 recognises it.
           use: entry.use ?? "업무시설",
           floors: storeys,
-          height_m: storeys * storeyHeight,
-          storey_height_m: storeyHeight,
-          area_m2: footprintArea,
-          gross_floor_area_m2: footprintArea * storeys,
-          far_contribution: entry.far ?? 0,
+          height_m: storeys * (entry.storey_height ?? STOREY_M),
+          area_m2: Math.round(rect.area),
           zone_fid: zone.id,
           generated: true,
-          ...(entry.anchor ? { anchor: entry.anchor } : {}),
-          ...(Number.isFinite(entry.aspect) ? { aspect: entry.aspect } : {}),
-          ...(entry.note ? { note: entry.note } : {}),
         },
         geometry: {
           type: "Polygon",

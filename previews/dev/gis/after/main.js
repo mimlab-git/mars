@@ -1,346 +1,780 @@
-// Entry point: wire the modules together, drive the UI, expose __viewer.
+// Track B: the light, site-scoped viewer.
+//
+// Track A (index.html) draws the whole 9-sheet AOI and swaps OSM for NGII
+// inside it; this page draws ONLY the Seun zones and their 1,759 buildings
+// from the committed extraction - no database, no bbox API, no swap
+// machinery. What Track A treats as toggles (colour by use) or sliders
+// (storey height) are facts here: a building's colour IS its use, and its
+// storey height comes from what kind of building it is (USE_STOREY_M).
 
-import { AREA, COLORS } from "./config.js";
+import {
+  COLORS,
+  LOD_STEPS,
+  OSM_BUILDING_LAYERS,
+  USE_STOREY_M,
+} from "./config.js";
 import {
   postComparisonBuilding,
   startComparisonBridge,
-} from "./comparison.js?v=trackb-panels-v1";
-import { createMap, loadViews, waitIdle } from "./map.js";
-import {
-  OSM_OUTSIDE_LAYER,
-  OSM_STRADDLE_LAYER,
-  addOSMOutsideLayer,
-  insideIdCount,
-  isSwapEnabled,
-  refreshInsideIds,
-  setSwapEnabled,
-} from "./swap.js";
-import { Buildings, NGII_LAYER, NGII_LAYERS } from "./buildings.js";
-import { ZONE_FILL_LAYER, Zones } from "./zones.js";
-import { generateMassing, isUpdatable, verifyInsideZone } from "./zoneupdate.js";
+} from "./comparison.js";
+import { createMap, waitIdle } from "./map.js";
+import { intersectsArea } from "./swap.js";
+import { Zones } from "./zones.js";
+import { generateMassing, verifyInsideZone } from "./zoneupdate.js";
 
 const $ = (id) => document.getElementById(id);
+const SNAPSHOT = location.pathname.split("/").includes("after")
+  ? "after"
+  : "before";
 const status = (text) => {
   $("status").textContent = text;
 };
 
-const map = await createMap("map");
-const buildings = new Buildings(map);
-const zones = new Zones(map);
-let useLegend = [];
+export const SITE_SOURCE = "site-buildings";
+export const SITE_LAYER = "site-3d";
 
-function summarizeSiteUses() {
+const map = await createMap("map");
+const zones = new Zones(map);
+
+const firstSymbol = map
+  .getStyle()
+  .layers.find((l) => l.type === "symbol")?.id;
+
+export const OSM_OUTSIDE_LAYER = "osm-outside-zones";
+export const OSM_STRADDLE_LAYER = "osm-straddle-zones";
+const OSM_STRADDLE_SOURCE = "osm-straddle-zones-src";
+
+/** OSM ids hidden because they touch a zone; see addOsmOutsideZones. */
+let maskedIds = new Set();
+
+/** Cost of the last mask scan, in ms - this was 3.6 s before the bbox
+ * pre-filter, on every `idle`, which is what made startup crawl. */
+let lastScanMs = 0;
+
+/**
+ * The mirofish scenario: fid -> {features, report, config}.
+ *
+ * Track A keeps this separate from a second Map of hand-made edits, since
+ * there the two must be switchable independently. Track B has no editing,
+ * so one Map is the whole story.
+ */
+const simZones = new Map();
+
+/** Whether the scenario is DRAWN. Hiding never discards it. */
+let simVisible = SNAPSHOT === "after";
+$("sim-toggle").checked = simVisible;
+
+/** The scenario file's own metadata, for the panel header. */
+let simMeta = { scenario: null, status: null };
+let scenarioConfig = null;
+
+/** Currently inspected building, or null for the per-zone summary. */
+let selectedBuilding = null;
+
+/**
+ * The swap, zone-scoped: OSM buildings everywhere EXCEPT inside a zone,
+ * ours inside. Same shape as Track A's sheet-grid swap (swap.js), with
+ * the zones' union as the boundary instead of the 9-sheet AREA.
+ *
+ * `within` excludes only features FULLY inside the union, so an OSM
+ * building straddling a zone edge is still drawn and can overlap ours -
+ * the same edge behaviour Track A accepts, without Track A's id-masking
+ * machinery. Zone-scoped the boundary is ~50x shorter than the sheet
+ * grid's, so the overlap population is smaller still.
+ */
+function addOsmOutsideZones(zoneUnion) {
+  const template = map.getLayer("building-3d");
+  if (!template) {
+    console.warn("style has no building-3d layer; surround unavailable");
+    return false;
+  }
+  for (const id of OSM_BUILDING_LAYERS) {
+    if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", "none");
+  }
+  map.addLayer(
+    {
+      id: OSM_OUTSIDE_LAYER,
+      type: "fill-extrusion",
+      source: template.source,
+      "source-layer": template.sourceLayer,
+      // Inherit the style's own zoom range - the basemap already decided
+      // when its buildings appear (Track A lesson: do not override it).
+      ...(template.minzoom === undefined ? {} : { minzoom: template.minzoom }),
+      ...(template.maxzoom === undefined ? {} : { maxzoom: template.maxzoom }),
+      // `within` to begin with; maskInsideIds adds the id clause once
+      // tiles have been observed.
+      filter: ["!", ["within", zoneUnion]],
+      paint: {
+        "fill-extrusion-color": COLORS.osm,
+        "fill-extrusion-height": ["get", "render_height"],
+        "fill-extrusion-base": ["get", "render_min_height"],
+        "fill-extrusion-opacity": 0.55,
+      },
+    },
+    firstSymbol,
+  );
+
+  // The re-draw layer for straddlers' outside parts. Same look and zoom
+  // range: to the eye these ARE osm-outside buildings, just routed through
+  // GeoJSON because no filter can cut one feature apart.
+  map.addSource(OSM_STRADDLE_SOURCE, {
+    type: "geojson",
+    data: { type: "FeatureCollection", features: [] },
+  });
+  map.addLayer(
+    {
+      id: OSM_STRADDLE_LAYER,
+      type: "fill-extrusion",
+      source: OSM_STRADDLE_SOURCE,
+      ...(template.minzoom === undefined ? {} : { minzoom: template.minzoom }),
+      ...(template.maxzoom === undefined ? {} : { maxzoom: template.maxzoom }),
+      paint: {
+        "fill-extrusion-color": COLORS.osm,
+        "fill-extrusion-height": ["get", "render_height"],
+        "fill-extrusion-base": ["get", "render_min_height"],
+        "fill-extrusion-opacity": 0.55,
+      },
+    },
+    firstSymbol,
+  );
+
+  // `within` alone leaves OSM buildings standing on the zones. Two
+  // separate reasons, both of which Track A already solved:
+  //
+  //   1. `within` tests the TILE-CLIPPED geometry, so a building split
+  //      across a tile seam has no piece that is fully inside. Measured:
+  //      7 wholly-inside buildings survived the filter.
+  //   2. A building only PARTLY over a zone is not "within" it at all, so
+  //      it keeps its whole footprint - including the half sitting on our
+  //      massing. Measured: 24 more.
+  //
+  // The rule is Track A's: an id that TOUCHES a zone is excluded outright,
+  // and the parts of it lying outside are re-drawn from GeoJSON. Nothing
+  // OSM draws is left overlapping the site.
+  // Per-zone bounding boxes, and their union. The exact test below is
+  // O(building vertices x zone vertices), and this site has 3,298 zone
+  // vertices against Track A's 5 - measured, the vertex half alone took
+  // 3.6 s per scan and ran on every `idle`, which is the startup lag.
+  // Nearly every building in view is nowhere near a zone, so a box test
+  // rejects it for a few comparisons instead of a few thousand.
+  const zoneBoxes = zoneUnion.coordinates.map((poly) => {
+    let minX = 180;
+    let minY = 90;
+    let maxX = -180;
+    let maxY = -90;
+    for (const [x, y] of poly[0]) {
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    return { minX, minY, maxX, maxY };
+  });
+  const siteBox = zoneBoxes.reduce((a, b) => ({
+    minX: Math.min(a.minX, b.minX),
+    minY: Math.min(a.minY, b.minY),
+    maxX: Math.max(a.maxX, b.maxX),
+    maxY: Math.max(a.maxY, b.maxY),
+  }));
+
+  const geomBox = (geometry) => {
+    const polys =
+      geometry.type === "MultiPolygon"
+        ? geometry.coordinates
+        : [geometry.coordinates];
+    let minX = 180;
+    let minY = 90;
+    let maxX = -180;
+    let maxY = -90;
+    for (const poly of polys) {
+      for (const [x, y] of poly[0]) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+    return { minX, minY, maxX, maxY };
+  };
+  const boxesOverlap = (a, b) =>
+    a.minX <= b.maxX && b.minX <= a.maxX && a.minY <= b.maxY && b.minY <= a.maxY;
+
+  const state = {
+    flags: new Map(),
+    hidden: new Set(),
+    parts: new Map(),
+    seen: new Set(),
+  };
+  const refresh = () => {
+    if (!map.getLayer(OSM_OUTSIDE_LAYER)) return 0;
+    const started = performance.now();
+    const before = state.hidden.size;
+    const found = map.querySourceFeatures(template.source, {
+      sourceLayer: template.sourceLayer,
+    });
+    /** Features actually examined this scan; the harvest works off these. */
+    const examined = [];
+
+    // Facts only ever turn true, so a later tile can reveal an outside
+    // piece but never take one away.
+    for (const f of found) {
+      if (f.id === undefined) continue;
+      // Test each id ONCE per tile it arrives in, not once per scan.
+      // `querySourceFeatures` returns the same features again on every
+      // idle, and re-running the exact test on the ~80 near the site kept
+      // each scan at 288 ms no matter how little had changed. A tile key
+      // in the seen-set lets a NEW tile still contribute its piece (which
+      // is how a straddler gets promoted) while a repeat costs nothing.
+      const tile = f._vectorTileFeature?._z ?? 0;
+      const seenKey = `${f.id}@${tile}:${f._vectorTileFeature?._x ?? 0},${f._vectorTileFeature?._y ?? 0}`;
+      if (state.seen.has(seenKey)) continue;
+      state.seen.add(seenKey);
+      let flags = state.flags.get(f.id);
+      if (!flags) {
+        flags = { touches: false, spills: false };
+        state.flags.set(f.id, flags);
+      }
+      // Cheap rejection next. A building whose box misses the site cannot
+      // touch a zone, and is plainly not fully inside one - both facts
+      // settled without a single vertex test. The flags are still
+      // recorded, exactly as the unoptimised path would: `touches` stays
+      // false and `spills` becomes true, which is what Track A's
+      // intersectsArea/pieceFullyInside pair would have returned here.
+      const box = geomBox(f.geometry);
+      if (!boxesOverlap(box, siteBox)) {
+        flags.spills = true;
+        continue;
+      }
+      flags.touches ||= intersectsArea(f.geometry, zoneUnion);
+      flags.spills ||= !pieceFullyInside(f.geometry, zoneUnion);
+      examined.push(f);
+    }
+
+    state.hidden.clear();
+    for (const [id, flags] of state.flags) {
+      if (flags.touches) state.hidden.add(id);
+    }
+
+    // Harvest the outside sub-polygons of anything that touches AND spills.
+    //
+    // Keyed by ID, one entry each. Track A keys each sub-polygon by its
+    // first vertex, which works against one rectangle; against 48 zone
+    // polygons the same building is clipped into slightly different
+    // pieces by every tile it appears in, so that key never repeats and
+    // the source grew to 9,123 features for 27 buildings.
+    // Harvest only what this scan newly examined; `parts` keeps one entry
+    // per id across scans, so a straddler clipped better by a later tile
+    // replaces its own entry and nothing accumulates.
+    let partsAdded = 0;
+    for (const f of examined) {
+      const flags = state.flags.get(f.id);
+      if (!flags?.touches || !flags.spills) continue;
+      const g = f.geometry;
+      const polys = g.type === "MultiPolygon" ? g.coordinates : [g.coordinates];
+      const keep = polys.filter((poly) => {
+        const sub = { type: "Polygon", coordinates: poly };
+        // Same cheap rejection: a piece clear of the site is kept without
+        // the exact test.
+        if (!boxesOverlap(geomBox(sub), siteBox)) return true;
+        return !intersectsArea(sub, zoneUnion);
+      });
+      if (!keep.length) continue;
+      state.parts.set(f.id, {
+        type: "Feature",
+        // Keep the OSM id, so a drawn part reports as the building it is.
+        id: f.id,
+        geometry: { type: "MultiPolygon", coordinates: keep },
+        properties: {
+          render_height: f.properties.render_height ?? 0,
+          render_min_height: f.properties.render_min_height ?? 0,
+        },
+      });
+      partsAdded += 1;
+    }
+
+    if (state.hidden.size !== before) {
+      map.setFilter(OSM_OUTSIDE_LAYER, [
+        "all",
+        ["!", ["within", zoneUnion]],
+        ["!", ["in", ["id"], ["literal", [...state.hidden]]]],
+      ]);
+    }
+    // Set every scan the harvest is non-empty: `parts` is rebuilt rather
+    // than appended, so an unchanged count can still mean changed pieces
+    // (a tile arriving with a cleaner clip of the same building).
+    if (partsAdded !== 0) {
+      map.getSource(OSM_STRADDLE_SOURCE)?.setData({
+        type: "FeatureCollection",
+        features: [...state.parts.values()],
+      });
+    }
+    maskedIds = state.hidden;
+    lastScanMs = Math.round(performance.now() - started);
+    return state.hidden.size - before;
+  };
+  map.on("idle", refresh);
+  refresh();
+  return true;
+}
+
+/** Is every vertex of this piece inside the zones? Mirrors swap.js. */
+function pieceFullyInside(geometry, union) {
+  const polys =
+    geometry.type === "MultiPolygon"
+      ? geometry.coordinates
+      : [geometry.coordinates];
+  for (const poly of polys) {
+    for (const [x, y] of poly[0]) {
+      if (!pointInZones(x, y, union)) return false;
+    }
+  }
+  return true;
+}
+
+/** Ray-cast against the zone union; mirrors swap.js pointInRing. */
+function pointInZones(lon, lat, union) {
+  for (const poly of union.coordinates) {
+    const ring = poly[0];
+    let inside = false;
+    for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+      const [xi, yi] = ring[i];
+      const [xj, yj] = ring[j];
+      if (yi > lat !== yj > lat) {
+        if (lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) inside = !inside;
+      }
+    }
+    if (inside) return true;
+  }
+  return false;
+}
+
+/** Colour by use - the default and only colouring here. */
+function useColorExpression() {
+  const { _other, ...uses } = COLORS.byUse;
+  return [
+    "match",
+    ["get", "use"],
+    ...Object.entries(uses).flat(),
+    _other,
+  ];
+}
+
+/** floors x per-use storey metres; the slider this page does not have. */
+function heightOf(properties) {
+  const storey = USE_STOREY_M[properties.use] ?? USE_STOREY_M._default;
+  return (properties.floors || 1) * storey;
+}
+
+/**
+ * What the map should show: the extracted buildings, minus the ones in a
+ * simulated zone, plus that zone's generated masses.
+ *
+ * `data` is never mutated - the scenario is a diff over it, so hiding the
+ * simulation restores the originals with no refetch. Same rule as Track
+ * A's buildings._rendered().
+ */
+function rendered() {
+  if (!data) return { type: "FeatureCollection", features: [] };
+  if (!simVisible || simZones.size === 0) return data;
+  const replaced = new Set(simZones.keys());
+  const features = data.features.filter(
+    (f) => !replaced.has(f.properties.zone_fid),
+  );
+  for (const sim of simZones.values()) features.push(...sim.features);
+  return { type: "FeatureCollection", features };
+}
+
+/** Push the current composition to the map. */
+function refreshSite() {
+  map.getSource(SITE_SOURCE)?.setData(rendered());
+}
+
+/** Signed shoelace area of a ring in m2; mirrors buildings.js ringArea. */
+function ringArea(ring, lat) {
+  let sum = 0;
+  for (let i = 0; i < ring.length - 1; i++) {
+    sum += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
+  }
+  const mPerLon = 111320 * Math.cos((lat * Math.PI) / 180);
+  return (Math.abs(sum) / 2) * mPerLon * 110540;
+}
+
+/** Footprint area, derived here rather than shipped in the extraction. */
+function footprintArea(feature) {
+  const g = feature.geometry;
+  const polys = g.type === "MultiPolygon" ? g.coordinates : [g.coordinates];
+  let total = 0;
+  for (const poly of polys) {
+    total += ringArea(poly[0], poly[0][0][1]);
+  }
+  return total;
+}
+
+/**
+ * Draw fewer buildings as the camera pulls back; identical rule to Track
+ * A's (LOD_STEPS in config.js), so the two pages thin the same data the
+ * same way. Tall OR large survives - storeys alone would drop a sprawling
+ * low market and a small shed together.
+ */
+function zoomFilter() {
+  const floorStep = ["step", ["zoom"]];
+  const areaStep = ["step", ["zoom"]];
+  LOD_STEPS.forEach(([zoom, minFloors, minArea], i) => {
+    // A `step` expression takes its first output before any stop, so the
+    // opening zoom is implicit and must not be emitted as a stop value.
+    if (i === 0) {
+      floorStep.push(minFloors);
+      areaStep.push(minArea);
+    } else {
+      floorStep.push(zoom, minFloors);
+      areaStep.push(zoom, minArea);
+    }
+  });
+  return [
+    "any",
+    [">=", ["get", "floors"], floorStep],
+    [">=", ["get", "area_m2"], areaStep],
+  ];
+}
+
+status("건물 불러오는 중...");
+let data = null;
+let useLegend = [];
+try {
+  const res = await fetch(
+    new URL("../data/site_buildings.geojson", import.meta.url),
+  );
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  data = await res.json();
+  for (const f of data.features) {
+    f.properties.height_m = heightOf(f.properties);
+    f.properties.area_m2 = Math.round(footprintArea(f));
+  }
+
+  map.addSource(SITE_SOURCE, { type: "geojson", data: rendered() });
+  map.addLayer(
+    {
+      id: SITE_LAYER,
+      type: "fill-extrusion",
+      source: SITE_SOURCE,
+      filter: zoomFilter(),
+      paint: {
+        "fill-extrusion-color": useColorExpression(),
+        "fill-extrusion-height": ["get", "height_m"],
+        "fill-extrusion-opacity": 0.95,
+      },
+    },
+    firstSymbol,
+  );
+  status(`건물 ${data.features.length.toLocaleString()}동`);
+} catch (err) {
+  status(`건물 로드 실패: ${err.message}`);
+  console.error(err);
+}
+
+let surroundReady = false;
+try {
+  await zones.load();
+  zones.addLayers(SITE_LAYER);
+
+  // One MultiPolygon of every zone, for the `within` filter. No real
+  // union is needed: the zones do not overlap (a building belongs to
+  // exactly one, which is what makes the centroid tagging work), so
+  // collecting their rings is enough.
+  const zoneUnion = {
+    type: "MultiPolygon",
+    coordinates: zones.data.features.flatMap((z) =>
+      z.geometry.type === "MultiPolygon"
+        ? z.geometry.coordinates
+        : [z.geometry.coordinates],
+    ),
+  };
+  surroundReady = addOsmOutsideZones(zoneUnion);
+  // Ours on top: the surround was inserted at firstSymbol, which puts it
+  // above the site layer added earlier.
+  if (surroundReady && map.getLayer(SITE_LAYER)) {
+    map.moveLayer(SITE_LAYER, firstSymbol);
+  }
+  status(`${$("status").textContent} · 구역 ${zones.count()}개`);
+} catch (err) {
+  console.error(`zones unavailable: ${err.message}`);
+}
+
+/**
+ * Load the mirofish scenario and draw it, before anyone touches a control.
+ *
+ * After the zones, because the massing engine generates against zone
+ * geometry. A missing file is not fatal - the page is still a viewer -
+ * but it is reported, since a silently absent simulation looks exactly
+ * like one with nothing in it.
+ */
+try {
+  const res = await fetch(new URL("../data/zone_config.json", import.meta.url), {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const cfg = await res.json();
+  scenarioConfig = cfg;
+  if (!Array.isArray(cfg?.zones)) throw new Error("zones[] missing");
+
+  const wanted = new Set(cfg.applied ?? cfg.zones.map((z) => z.zone_fid));
+  for (const config of cfg.zones) {
+    if (!wanted.has(config.zone_fid)) continue;
+    const zone = zones.data?.features.find((f) => f.id === config.zone_fid);
+    if (!zone) {
+      console.warn(`sim: no zone with fid ${config.zone_fid}`);
+      continue;
+    }
+    const { features, report } = generateMassing(zone, config);
+    if (report.error) {
+      console.warn(`sim: zone ${config.zone_fid}: ${report.error}`);
+      continue;
+    }
+    // The engine's boundary rule holds here too: a mass that escaped its
+    // zone is reported, not drawn.
+    const check = verifyInsideZone(features, zone);
+    if (!check.ok) {
+      console.warn(
+        `sim: zone ${config.zone_fid} left its boundary (${check.outsideCount})`,
+      );
+      continue;
+    }
+    for (const f of features) {
+      // Track B's storey height, not the engine's flat 4.0 m default.
+      f.properties.height_m = heightOf(f.properties);
+      // Without this the LOD filter reads `area_m2` as missing and drops
+      // every generated mass the moment the camera pulls back.
+      f.properties.area_m2 ??= Math.round(footprintArea(f));
+    }
+    simZones.set(config.zone_fid, { features, report, config });
+    simMeta = {
+      scenario: config.scenario_basis ?? simMeta.scenario,
+      status: config.agreement_status ?? simMeta.status,
+    };
+  }
+  refreshSite();
+  status(`${$("status").textContent} · 시뮬레이션 ${simZones.size}개 구역`);
+} catch (err) {
+  console.warn(`simulation unavailable: ${err.message}`);
+  status(`${$("status").textContent} · 시뮬레이션 없음`);
+}
+
+// Frame the site: the camera the page opens on is computed from the zones
+// themselves, so a change to the site moves the framing with it.
+if (zones.data) {
+  let minX = 180;
+  let minY = 90;
+  let maxX = -180;
+  let maxY = -90;
+  for (const z of zones.data.features) {
+    for (const ring of z.geometry.coordinates) {
+      for (const [x, y] of ring) {
+        if (x < minX) minX = x;
+        if (y < minY) minY = y;
+        if (x > maxX) maxX = x;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  const cam = map.cameraForBounds(
+    [
+      [minX, minY],
+      [maxX, maxY],
+    ],
+    { padding: 80, bearing: -15 },
+  );
+  map.jumpTo({ ...cam, pitch: 55 });
+}
+document.documentElement.classList.add("viewer-ready");
+
+// --- legend -----------------------------------------------------------
+//
+// Built from the data, not the palette: only uses that exist on site get
+// a row, with their counts, so the legend doubles as a verification
+// readout. 자동차관련시설 has no colour of its own and lands on _other.
+
+{
   const counts = new Map();
-  for (const feature of buildings.data?.features ?? []) {
-    if (feature.properties.zone_fid == null) continue;
-    const use = feature.properties.use || "(없음)";
+  for (const f of data?.features ?? []) {
+    const use = f.properties.use || "(없음)";
     counts.set(use, (counts.get(use) ?? 0) + 1);
   }
-  return [...counts.entries()]
+  useLegend = [...counts.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([use, count]) => ({
       use,
       count,
       color: COLORS.byUse[use] ?? COLORS.byUse._other,
     }));
+  $("legend").innerHTML = useLegend
+    .map(({ use, count, color }) => {
+      return (
+        `<div class="legend"><span class="swatch" style="background:${color}"></span>` +
+        `${use}<span class="count">${count.toLocaleString()}</span></div>`
+      );
+    })
+    .join("");
 }
 
-// The style's first label layer. Buildings must be inserted below it so
-// street names stay readable on top of the extrusions.
-const firstSymbol = map
-  .getStyle()
-  .layers.find((l) => l.type === "symbol")?.id;
+// --- simulation panel -------------------------------------------------
+//
+// Two states in one panel: the per-zone summary of what the scenario
+// does, and - when a building is clicked - what that one building is.
+// The summary answers "what changes here"; the detail answers "what is
+// this", and both come from the engine's own report rather than being
+// recomputed, so the panel cannot drift from what was drawn.
 
-status("건물 불러오는 중...");
-let loaded = 0;
-let comparisonScenario = null;
-let comparisonScenarioConfig = null;
-let scenarioVisible = true;
-let zoneTagged = 0;
-try {
-  const zoneCount = await zones.load();
-  loaded = await buildings.load(zones.bounds());
-  const swapReady = addOSMOutsideLayer(map, firstSymbol);
-  buildings.addLayer(firstSymbol);
-  zones.addLayers(NGII_LAYER);
-  const tagged = zones.tagBuildings(buildings.data.features);
-  zoneTagged = tagged.tagged;
-  useLegend = summarizeSiteUses();
-  buildings.refresh();
-  zones.addHighlightLayer(firstSymbol);
-  setSwapEnabled(map, true);
-  status(
-    swapReady
-      ? `NGII 건물 ${loaded.toLocaleString()}동 · 구역 ${zoneCount}개`
-      : `NGII 건물 ${loaded.toLocaleString()}동 (구역 외 OSM 레이어 실패)`,
+const esc = (s) =>
+  String(s).replace(
+    /[&<>"]/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c],
   );
-} catch (err) {
-  status(`건물 로드 실패: ${err.message}`);
-  console.error(err);
-}
 
-// --- controls ---------------------------------------------------------
+const zoneLabel = (fid) => {
+  const p = zones.get(fid);
+  return p ? `구역 ${p.zone_dtl || p.zone}` : `fid ${fid}`;
+};
 
-$("swap").addEventListener("change", (e) => {
-  setSwapEnabled(map, e.target.checked);
-  buildings.setVisible(e.target.checked);
-});
+const row = (k, v) =>
+  `<div class="zone-row"><span>${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
 
-buildings.setColorByUse(true);
+function renderSimSummary() {
+  $("sim-meta").innerHTML = simMeta.scenario
+    ? `${esc(simMeta.scenario)}<br>${esc(simMeta.status ?? "")}`
+    : "";
 
-$("show-zones").addEventListener("change", (e) => {
-  zones.setVisible(e.target.checked);
-  if (!e.target.checked) showZone(null);
-});
-
-/** Render the selected zone's attributes, or clear the panel. */
-function showZone(fid) {
-  const buildingIds =
-    fid === null || buildings.zoneUpdates.has(fid)
-      ? []
-      : buildings.originalIn(fid).map((f) => f.id);
-  const p = zones.select(fid, buildingIds);
-  const box = $("zone-info");
-  if (!p) {
-    box.innerHTML = "";
-    return null;
-  }
-  // Most attributes are empty in the source (stage 0/48, zone_area 7/48),
-  // so only show what this zone actually has.
-  const rows = [`<b>${p.zone_nm || p.zone_type}</b>`];
-  rows.push(`<span>fid ${p.fid} · 구역 ${p.zone_dtl || p.zone || "-"}</span>`);
-  if (p.zone_nm) rows.push(`<span>${p.zone_type}</span>`);
-  if (p.location) rows.push(`<span>${p.location}</span>`);
-  box.innerHTML = rows.join("<br>");
-  return p;
-}
-
-// --- zone update panel ------------------------------------------------
-//
-// The panel is the configuration table made editable. It appears only for
-// the 28 zones whose interior may be rebuilt - the 존치관리 zones and the
-// parks have nothing to configure, and offering them a form would imply
-// otherwise.
-//
-// Configs live here keyed by fid, and that map is what export writes and
-// import reads. It is deliberately the same shape the engine takes, so a
-// file from mirofish can be dropped in without translation.
-
-// From config.js, so a generated mass carries a use the colour table and
-// the NGII data both recognise. Inventing labels here ("업무" instead of
-// "업무시설") left every new building grey under 용도별 색상.
-const USES = COLORS.buildableUses;
-const DEFAULT_MASS = { use: "업무시설", far: 800, floors: 20, count: 2 };
-
-/** fid -> config, the editable state behind the panel. */
-const configs = new Map();
-
-function configFor(fid) {
-  if (!configs.has(fid)) {
-    configs.set(fid, {
-      zone_fid: fid,
-      green_ratio: 0.15,
-      buildings: [{ ...DEFAULT_MASS }],
-    });
-  }
-  return configs.get(fid);
-}
-
-/** Show the panel for an updatable zone, or hide it for anything else. */
-function showUpdatePanel(fid, props) {
-  const panel = $("update-panel");
-  if (fid === null || !props || !isUpdatable(props.zone_type)) {
-    panel.classList.remove("open");
+  if (simZones.size === 0) {
+    $("sim-body").innerHTML =
+      "<span style='color:#999'>시뮬레이션 결과 없음</span>";
     return;
   }
-  panel.classList.add("open");
-  $("update-zone").textContent =
-    `fid ${fid} · ${props.zone_type}` +
-    (props.location ? ` · ${props.location}` : "");
 
-  // The city's own figures for this zone, where the plan states them.
-  // They are the benchmark a generated massing is judged against, so they
-  // belong next to the inputs rather than buried in the data.
-  const plan = $("update-plan");
-  const far =
-    props.zone_area && props.tt_area
-      ? ((props.tt_area / props.zone_area) * 100).toFixed(0)
-      : null;
-  if (props.scale || far) {
-    plan.style.display = "";
-    plan.textContent =
-      `계획: ${props.scale ?? "-"}` + (far ? ` · 용적률 ${far}%` : "");
-  } else {
-    plan.style.display = "none";
+  const cards = [];
+  for (const [fid, sim] of simZones) {
+    const r = sim.report;
+    const demolished = data.features.filter(
+      (f) => f.properties.zone_fid === fid,
+    ).length;
+    const masses = sim.features
+      .map((f) => {
+        const p = f.properties;
+        const color = COLORS.byUse[p.use] ?? COLORS.byUse._other;
+        return (
+          `<div class="mass-chip"><span class="swatch" style="background:${color}"></span>` +
+          `${esc(p.use)} · ${p.floors}층 · ${p.area_m2.toLocaleString()}㎡</div>`
+        );
+      })
+      .join("");
+    cards.push(
+      `<div class="zone-card">` +
+        `<div class="zone-name">${esc(zoneLabel(fid))} <span style="color:#999;font-weight:400">fid ${fid}</span></div>` +
+        row("기존 → 신규", `${demolished}동 철거 → ${r.placed}동`) +
+        row("용적률", `${r.achievedFar}% / 목표 ${r.targetFar}%`) +
+        row("연면적", `${r.achievedGfaM2.toLocaleString()}㎡`) +
+        row("대지 / 가용", `${r.siteAreaM2.toLocaleString()} / ${r.buildableAreaM2.toLocaleString()}㎡`) +
+        row("녹지 · 이격", `${Math.round(r.greenRatio * 100)}% · ${r.setbackM}m`) +
+        masses +
+        `</div>`,
+    );
   }
-
-  const config = configFor(fid);
-  $("green-ratio").value = config.green_ratio;
-  renderMasses(config);
-  renderReport(fid);
+  $("sim-body").innerHTML =
+    cards.join("") +
+    `<div class="sim-hint">건물을 클릭하면 상세를 봅니다.</div>`;
 }
 
-function renderMasses(config) {
-  const list = $("mass-list");
-  list.innerHTML = "";
-  config.buildings.forEach((mass, index) => {
-    const box = document.createElement("div");
-    box.className = "mass";
-    box.innerHTML = `
-      <div class="mass-head">
-        <span>용도 ${index + 1}</span>
-        <button type="button" data-remove="${index}" title="삭제">×</button>
-      </div>
-      <div class="field">
-        <label>용도</label>
-        <select data-field="use" data-index="${index}">
-          ${USES.map(
-            (u) =>
-              `<option value="${u}"${u === mass.use ? " selected" : ""}>${u}</option>`,
-          ).join("")}
-        </select>
-      </div>
-      <div class="field">
-        <label>용적률 %</label>
-        <input type="number" min="0" step="10" value="${mass.far}"
-               data-field="far" data-index="${index}" />
-      </div>
-      <div class="field">
-        <label>층수</label>
-        <input type="number" min="1" max="120" step="1" value="${mass.floors}"
-               data-field="floors" data-index="${index}" />
-      </div>
-      <div class="field">
-        <label>동 수</label>
-        <input type="number" min="1" max="12" step="1" value="${mass.count}"
-               data-field="count" data-index="${index}" />
-      </div>`;
-    list.append(box);
-  });
-  // One button is disabled rather than hidden: a zone always needs at
-  // least one use, and hiding the control would look like a bug.
-  list.querySelectorAll("[data-remove]").forEach((b) => {
-    b.disabled = config.buildings.length <= 1;
-    b.style.visibility = config.buildings.length <= 1 ? "hidden" : "";
-  });
-}
+function renderBuildingDetail(props) {
+  const back = `<span class="back-link" id="sim-back">← 구역 요약으로</span>`;
+  const color = COLORS.byUse[props.use] ?? COLORS.byUse._other;
+  const title =
+    `<div class="detail-title">` +
+    `<span class="swatch" style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${color};margin-right:5px"></span>` +
+    `${esc(props.use || "(용도 없음)")}</div>`;
 
-/** Report the last apply: what was asked, what was achieved, and the
- *  boundary check, which is the one that must never fail. */
-function renderReport(fid) {
-  const box = $("update-report");
-  const report = lastReports.get(fid);
-  if (!report) {
-    box.innerHTML = buildings.zoneUpdates.has(fid)
-      ? "적용됨"
-      : "<span style='color:#999'>미적용</span>";
+  const storey = USE_STOREY_M[props.use] ?? USE_STOREY_M._default;
+  const common =
+    row("층수 / 높이", `${props.floors}층 · ${props.height_m.toFixed(1)}m`) +
+    row("층고", `${storey}m (용도 기준)`) +
+    row("바닥면적", `${(props.area_m2 ?? 0).toLocaleString()}㎡`);
+
+  if (!props.generated) {
+    // An existing NGII building. Say whether the scenario removes it.
+    const doomed = simZones.has(props.zone_fid);
+    const fate = doomed
+      ? `<div class="detail-note">이 건물은 시뮬레이션 적용 시 철거됩니다 (현재 '표시' 꺼짐 상태).</div>`
+      : "";
+    $("sim-body").innerHTML =
+      back +
+      title +
+      common +
+      row("구역", props.zone_fid ? zoneLabel(props.zone_fid) : "구역 밖") +
+      (props.name ? row("명칭", props.name) : "") +
+      (props.kind ? row("종류", props.kind) : "") +
+      row("gid", props.gid ?? "-") +
+      fate;
     return;
   }
-  if (report.error) {
-    box.innerHTML = `<span class="bad">${report.error}</span>`;
-    return;
-  }
-  const violated = report.boundary.outsideCount > 0;
-  box.innerHTML = [
-    `대지 ${report.siteAreaM2.toLocaleString()} m2`,
-    `가용 ${report.buildableAreaM2.toLocaleString()} m2 (이격 ${report.setbackM} m)`,
-    `동수 ${report.placed}/${report.requested}`,
-    `용적률 ${report.achievedFar}% / 목표 ${report.targetFar}%`,
-    `철거 ${report.demolished}동`,
-    violated
-      ? `<span class="bad">구역 이탈 ${report.boundary.outsideCount}</span>`
-      : `<span class="good">구역 이탈 0</span>`,
-  ].join("\n");
+
+  // A generated mass: pair it with its config entry and the zone report.
+  const sim = simZones.get(props.zone_fid);
+  const entry = sim?.config.buildings.find((b) => b.use === props.use);
+  const massReport = sim?.report.masses.find(
+    (m) => m.use === props.use && m.storeys === props.floors,
+  );
+  const gfa = (props.area_m2 ?? 0) * props.floors;
+  const anchorText = { S: "청계천 방향 (남)", N: "종묘 방향 (북)", E: "동", W: "서" };
+
+  $("sim-body").innerHTML =
+    back +
+    title +
+    row("구분", "시뮬레이션 신규 매스") +
+    row("구역", zoneLabel(props.zone_fid)) +
+    common +
+    row("연면적", `${gfa.toLocaleString()}㎡`) +
+    (entry ? row("용적률 기여", `${entry.far}%`) : "") +
+    (massReport && massReport.targetFootprint !== massReport.achievedFootprint
+      ? row(
+          "목표 바닥면적",
+          `${massReport.targetFootprint.toLocaleString()}㎡ (미달)`,
+        )
+      : "") +
+    (entry?.anchor ? row("배치", anchorText[entry.anchor] ?? entry.anchor) : "") +
+    (entry?.aspect ? row("형상비", `${entry.aspect} (남북 연장)`) : "") +
+    (entry?.note ? `<div class="detail-note">${esc(entry.note)}</div>` : "");
 }
 
-/** fid -> the report from its last apply, for the panel to display. */
-const lastReports = new Map();
+function renderSimPanel() {
+  if (selectedBuilding) renderBuildingDetail(selectedBuilding);
+  else renderSimSummary();
+}
 
-$("mass-list")?.addEventListener("input", (e) => {
-  const fid = zones.selected;
-  if (fid === null) return;
-  const { field, index } = e.target.dataset;
-  if (!field) return;
-  const mass = configFor(fid).buildings[Number(index)];
-  mass[field] = field === "use" ? e.target.value : Number(e.target.value);
+// Delegated: the back link is re-created on every render.
+$("sim-body").addEventListener("click", (e) => {
+  if (e.target.id === "sim-back") viewer.selectBuilding(null);
 });
 
-$("mass-list")?.addEventListener("click", (e) => {
-  const remove = e.target.dataset.remove;
-  if (remove === undefined) return;
-  const config = configFor(zones.selected);
-  config.buildings.splice(Number(remove), 1);
-  renderMasses(config);
+$("sim-toggle").addEventListener("change", (e) => {
+  viewer.setSimVisible(e.target.checked);
 });
 
-$("add-mass")?.addEventListener("click", () => {
-  const config = configFor(zones.selected);
-  config.buildings.push({ ...DEFAULT_MASS, use: "상업", far: 300, floors: 5 });
-  renderMasses(config);
+// Click a building to inspect it; click empty ground to go back.
+map.on("click", (e) => {
+  const hits = map.queryRenderedFeatures(e.point, { layers: [SITE_LAYER] });
+  const building = hits.length ? { ...hits[0].properties } : null;
+  viewer.selectBuilding(building);
+  postComparisonBuilding(SNAPSHOT, building);
+});
+map.on("mouseenter", SITE_LAYER, () => {
+  map.getCanvas().style.cursor = "pointer";
+});
+map.on("mouseleave", SITE_LAYER, () => {
+  map.getCanvas().style.cursor = "";
 });
 
-$("green-ratio")?.addEventListener("input", (e) => {
-  if (zones.selected === null) return;
-  configFor(zones.selected).green_ratio = Number(e.target.value);
-});
+// --- debug panel + __viewer -------------------------------------------
 
-$("apply-update")?.addEventListener("click", () => {
-  const fid = zones.selected;
-  if (fid === null) return;
-  const report = viewer.applyZoneUpdate(configFor(fid));
-  lastReports.set(fid, report);
-  renderReport(fid);
-});
-
-$("reset-update")?.addEventListener("click", () => {
-  const fid = zones.selected;
-  if (fid === null) return;
-  viewer.resetZone(fid);
-  lastReports.delete(fid);
-  renderReport(fid);
-});
-
-// --- configuration table I/O ------------------------------------------
-//
-// Export/import IS the persistence story. The DB is read-only, so an
-// update has nowhere to be written; a JSON file makes a run reproducible
-// and reviewable without adding the project's first writable dependency.
-
-$("export-config")?.addEventListener("click", () => {
-  const blob = new Blob([viewer.exportConfig()], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "zone_config.json";
-  a.click();
-  URL.revokeObjectURL(url);
-});
-
-$("import-config")?.addEventListener("click", () => $("import-file")?.click());
-
-$("import-file")?.addEventListener("change", async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  try {
-    const result = viewer.importConfig(await file.text());
-    status(`설정 불러옴: 구역 ${result.applied.length}개 적용`);
-  } catch (err) {
-    status(`불러오기 실패: ${err.message}`);
-  }
-  // Clear, so re-picking the same file fires `change` again.
-  e.target.value = "";
-});
-
-// --- debug panel ------------------------------------------------------
-//
-// Plain HTML on purpose. The WebGL canvas is opaque to accessibility
-// snapshots, so this text is how Playwright sees the map's state.
-
-const debug = $("debug-panel");
-let frames = 0;
 let fps = 0;
+let frames = 0;
 let lastSample = performance.now();
-
 map.on("render", () => {
   frames += 1;
   const now = performance.now();
@@ -351,8 +785,28 @@ map.on("render", () => {
   }
 });
 
+/** Drawn count; top 5% trimmed - past ~70 degrees of pitch a query box
+ * touching y=0 spans the horizon and returns nothing (see buildings.js). */
+function layerDrawnCount(id) {
+  const c = map.getCanvas();
+  if (!map.getLayer(id)) return 0;
+  const h = c.clientHeight;
+  return map.queryRenderedFeatures(
+    [
+      [0, Math.round(h * 0.05)],
+      [c.clientWidth, h],
+    ],
+    { layers: [id] },
+  ).length;
+}
+
+const drawnCount = () => layerDrawnCount(SITE_LAYER);
+
 const stats = () => {
   const c = map.getCenter();
+  const zoneTagged = (data?.features ?? []).filter(
+    (feature) => feature.properties.zone_fid != null,
+  ).length;
   return {
     lon: +c.lng.toFixed(5),
     lat: +c.lat.toFixed(5),
@@ -360,343 +814,122 @@ const stats = () => {
     pitch: Math.round(map.getPitch()),
     bearing: Math.round(map.getBearing()),
     fps,
-    ngiiLoaded: buildings.count(),
-    ngiiDrawn: buildings.drawnCount(),
-    ngiiOutsideArea: buildings.outsideArea,
-    floorHeight: buildings.floorHeight,
-    swap: isSwapEnabled(map),
-    osmMasked: insideIdCount(),
+    siteLoaded: data?.features.length ?? 0,
+    siteDrawn: drawnCount(),
+    osmDrawn: layerDrawnCount(OSM_OUTSIDE_LAYER),
+    osmStraddleDrawn: layerDrawnCount(OSM_STRADDLE_LAYER),
+    osmMasked: maskedIds.size,
+    maskScanMs: lastScanMs,
+    sim: { visible: simVisible, zones: simZones.size },
     zonesLoaded: zones.count(),
     zonesDrawn: zones.drawnCount(),
-    zoneSelected: zones.selected,
     zoneTagged,
-    zoneHighlightDrawn: zones.highlightDrawnCount(),
     useLegend,
-    idle: map.loaded() && map.areTilesLoaded(),
   };
 };
 
+const debug = $("debug-panel");
 const renderDebug = () => {
   const s = stats();
   debug.textContent = [
     `lon/lat  ${s.lon}, ${s.lat}`,
     `zoom     ${s.zoom}   pitch ${s.pitch}   bearing ${s.bearing}`,
     `fps      ${s.fps}`,
-    `NGII     ${s.ngiiLoaded.toLocaleString()} loaded / ${s.ngiiDrawn.toLocaleString()} drawn (${s.ngiiOutsideArea.toLocaleString()} outside area)`,
-    `floor    ${s.floorHeight.toFixed(1)} m`,
-    `swap     ${s.swap ? "on" : "off"}   OSM masked ${s.osmMasked.toLocaleString()}`,
-    `zones    ${s.zonesLoaded} loaded / ${s.zonesDrawn} drawn / ${s.zoneTagged.toLocaleString()} bldgs tagged` +
-      (s.zoneSelected === null
-        ? ""
-        : `\n         selected fid ${s.zoneSelected}   highlight ${s.zoneHighlightDrawn} drawn`),
+    `site     ${s.siteLoaded.toLocaleString()} loaded / ${s.siteDrawn.toLocaleString()} drawn`,
+    `OSM      ${s.osmDrawn.toLocaleString()} drawn + ${s.osmStraddleDrawn} parts   masked ${s.osmMasked} (${s.maskScanMs} ms)`,
+    `zones    ${s.zonesLoaded} loaded / ${s.zonesDrawn} drawn`,
+    `sim      ${s.sim.visible ? "on" : "off"} · ${s.sim.zones} zone(s)`,
   ].join("\n");
 };
-if (window.parent === window) {
-  let debugTimer = null;
-  const scheduleDebug = () => {
-    clearTimeout(debugTimer);
-    debugTimer = setTimeout(renderDebug, 180);
-  };
-  renderDebug();
-  map.on("moveend", scheduleDebug);
-  map.on("idle", scheduleDebug);
-}
+renderDebug();
+if (window.parent === window) setInterval(renderDebug, 500);
 
-// --- click inspection -------------------------------------------------
-
-map.on("click", (e) => {
-  // Zone selection tracks every click, including clicks on a building -
-  // the building sits in the zone, so both facts are wanted at once.
-  const [zoneHit] = map.getLayer(ZONE_FILL_LAYER)
-    ? map.queryRenderedFeatures(e.point, { layers: [ZONE_FILL_LAYER] })
-    : [];
-  showZone(zoneHit ? zoneHit.id : null);
-
-  const [hit] = map.queryRenderedFeatures(e.point, {
-    layers: [...NGII_LAYERS, OSM_OUTSIDE_LAYER, OSM_STRADDLE_LAYER].filter(
-      (id) => map.getLayer(id),
-    ),
-  });
-  if (!hit) {
-    postComparisonBuilding("after", null);
-    return;
-  }
-
-  const p = hit.properties;
-  postComparisonBuilding("after", {
-    id: hit.id ?? null,
-    dataset: NGII_LAYERS.includes(hit.layer.id) ? "NGII" : "OSM",
-    ...p,
-  });
-});
-
-for (const layer of NGII_LAYERS) {
-  map.on("mouseenter", layer, () => {
-    map.getCanvas().style.cursor = "pointer";
-  });
-  map.on("mouseleave", layer, () => {
-    map.getCanvas().style.cursor = "";
-  });
-}
-
-// --- test bridge ------------------------------------------------------
-//
-// Required by the project rules: every interactive feature above must be
-// reachable from here, because this is the only handle Playwright has.
-
-const views = await loadViews();
-
-// Named, because the update panel above calls back into these methods -
-// the UI drives exactly the same entry points Playwright does, so there is
-// no path a test cannot reach.
 const viewer = {
   map,
-  buildings,
-  views,
-  area: AREA,
   getStats: stats,
   waitIdle: (ms) => waitIdle(map, ms),
   flyTo(view) {
-    const target = typeof view === "string" ? views[view] : view;
-    if (!target) throw new Error(`unknown view: ${view}`);
     map.jumpTo({
-      center: [target.lon ?? target.center[0], target.lat ?? target.center[1]],
-      zoom: target.zoom,
-      pitch: target.pitch ?? 0,
-      bearing: target.bearing ?? target.heading ?? 0,
+      center: [view.lon ?? view.center[0], view.lat ?? view.center[1]],
+      zoom: view.zoom,
+      pitch: view.pitch ?? 0,
+      bearing: view.bearing ?? 0,
     });
     return waitIdle(map);
   },
-  setLayerVisible(name, visible) {
-    if (name === "ngii") buildings.setVisible(visible);
-    else if (map.getLayer(name)) {
-      map.setLayoutProperty(name, "visibility", visible ? "visible" : "none");
-    } else return false;
-    return true;
-  },
-  setSwap(enabled) {
-    $("swap").checked = enabled;
-    setSwapEnabled(map, enabled);
-    buildings.setVisible(enabled);
-    return enabled;
-  },
-  refreshMask: () => refreshInsideIds(map),
-  maskedCount: insideIdCount,
-  setFloorHeight(m) {
-    return buildings.setFloorHeight(Number(m));
-  },
-  setColorByUse(enabled) {
-    return buildings.setColorByUse(enabled);
-  },
-  zones,
-  setZonesVisible(visible) {
-    $("show-zones").checked = visible;
-    zones.setVisible(visible);
-    if (!visible) showZone(null);
-    return visible;
-  },
-  /** Highlight a zone by fid (null clears). Returns its attributes. */
-  selectZone: showZone,
-  /** Attributes of one zone without selecting it. */
-  zoneInfo: (fid) => zones.get(fid),
-  /** Zone fids actually drawn on screen. */
-  zonesDrawn: () => zones.drawnCount(),
   /**
-   * Buildings assigned to a zone, by gid. This is the link every zone
-   * update operates through: a config names a zone, and these are the
-   * buildings it may touch.
+   * Draw the mirofish layer, or hide it. Hiding does not discard: the
+   * masses stay in `simZones`, so this is a switch rather than a re-run.
    */
-  zoneBuildings: (fid) =>
-    buildings.data ? zones.buildingsIn(fid, buildings.data.features) : [],
-  /** Highlighted buildings actually DRAWN, not the number requested. */
-  zoneHighlightDrawn: () => zones.highlightDrawnCount(),
-  /**
-   * Apply a zone update: demolish everything in the zone and build the
-   * config's massing in its place.
-   *
-   *   __viewer.applyZoneUpdate({
-   *     zone_fid: 1, green_ratio: 0.2,
-   *     buildings: [{ use: "업무", far: 1200, floors: 36, count: 2 }],
-   *   })
-   *
-   * Returns the generator's report plus the boundary check. Nothing is
-   * applied if any generated vertex falls outside the zone - the rule is
-   * that a mass may not leave its zone, so a violation fails loudly
-   * instead of being clipped into something that looks fine.
-   */
-  applyZoneUpdate(config, refresh = true) {
-    const fid = config.zone_fid;
-    const zone = zones.data?.features.find((f) => f.id === fid);
-    if (!zone) return { error: `no zone with fid ${fid}` };
-
-    const { features, report } = generateMassing(zone, config);
-    if (report.error) return report;
-
-    const check = verifyInsideZone(features, zone);
-    if (!check.ok) {
-      return { ...report, applied: false, boundary: check };
+  setSimVisible(visible) {
+    simVisible = Boolean(visible);
+    $("sim-toggle").checked = simVisible;
+    refreshSite();
+    // A detail view of a mass that is no longer drawn would be a lie.
+    if (!simVisible && selectedBuilding?.generated) selectedBuilding = null;
+    renderSimPanel();
+    return simVisible;
+  },
+  /** What the scenario holds, per zone, with the engine's own numbers. */
+  simInfo() {
+    const out = {};
+    for (const [fid, sim] of simZones) {
+      out[fid] = {
+        masses: sim.features.length,
+        achievedFar: sim.report.achievedFar,
+        targetFar: sim.report.targetFar,
+        boundaryOk: true,
+      };
     }
-    const demolished = buildings.originalIn(fid).length;
-    buildings.setZoneUpdate(fid, features, refresh);
-    return { ...report, applied: true, demolished, boundary: check };
+    return { visible: simVisible, zones: out, meta: simMeta };
   },
-  /** Remove a zone's update (null clears every one). */
-  resetZone(fid = null, refresh = true) {
-    buildings.clearZoneUpdate(fid, refresh);
-    return { cleared: fid === null ? "all" : fid };
-  },
-  /** Zones with an update in force, and how many masses each holds. */
-  zoneUpdates: () =>
-    Object.fromEntries(
-      [...buildings.zoneUpdates].map(([fid, u]) => [fid, u.features.length]),
-    ),
-  /** Zone types this project will rebuild the interior of (28 of 48). */
-  updatableZones: () =>
-    zones.data.features
-      .filter((f) => isUpdatable(f.properties.zone_type))
-      .map((f) => f.id),
-  /**
-   * How the tagging came out, for verification: how many buildings landed
-   * in a zone, and the per-zone breakdown. `unassigned` is expected and
-   * large - the load covers the whole sheet grid, the zones cover 0.39 km2
-   * of it.
-   */
-  zoneTagStats() {
-    const feats = buildings.data?.features ?? [];
-    const perZone = new Map();
-    for (const f of feats) {
-      const fid = f.properties.zone_fid;
-      if (fid !== null && fid !== undefined) {
-        perZone.set(fid, (perZone.get(fid) ?? 0) + 1);
-      }
-    }
-    const tagged = [...perZone.values()].reduce((sum, count) => sum + count, 0);
-    return {
-      total: buildings.count(),
-      tagged,
-      unassigned: buildings.count() - tagged,
-      zonesWithBuildings: perZone.size,
-      perZone: Object.fromEntries([...perZone].sort((a, b) => a[0] - b[0])),
-    };
-  },
-  selectFeature(id) {
-    const f = buildings.selectFeature(id);
-    return f ? { id: f.id, ...f.properties } : null;
+  /** The full engine reports, for verification. */
+  simReports: () =>
+    Object.fromEntries([...simZones].map(([fid, s]) => [fid, s.report])),
+  /** Inspect one building in the panel (null returns to the summary). */
+  selectBuilding(props) {
+    selectedBuilding = props ?? null;
+    renderSimPanel();
+    return selectedBuilding;
   },
   /**
-   * Places on screen where BOTH datasets draw a building - the bug this
-   * whole intersects rule exists to remove. Samples a grid rather than
-   * testing geometry, because what matters is what is drawn, not what was
-   * loaded. Returns the offending points so they can be flown to.
+   * What is DRAWN at a point, per layer - ours inside a zone, the
+   * basemap's outside. Both counts, because "the surround is back" is a
+   * claim about the OSM layer that the site count cannot make.
    */
-  findOverlaps(step = 12) {
-    const c = map.getCanvas();
-    const layers = [...NGII_LAYERS, OSM_OUTSIDE_LAYER, OSM_STRADDLE_LAYER].filter(
-      (id) => map.getLayer(id),
-    );
-    if (layers.length < 2) return { checked: 0, overlaps: [] };
-
-    const overlaps = [];
-    let checked = 0;
-    for (let x = 0; x < c.clientWidth; x += step) {
-      for (let y = 0; y < c.clientHeight; y += step) {
-        checked += 1;
-        const hits = map.queryRenderedFeatures([x, y], { layers });
-        if (!hits.length) continue;
-        const hasNgii = hits.some((h) => NGII_LAYERS.includes(h.layer.id));
-        const hasOsm = hits.some((h) => !NGII_LAYERS.includes(h.layer.id));
-        if (hasNgii && hasOsm) {
-          const ll = map.unproject([x, y]);
-          overlaps.push({ x, y, lon: +ll.lng.toFixed(6), lat: +ll.lat.toFixed(6) });
-        }
-      }
-    }
-    return { checked, overlaps, count: overlaps.length };
-  },
-  /** Which datasets draw at a point - the overlap check. */
   buildingsAt(lon, lat) {
     const pt = map.project([lon, lat]);
-    const box = [
-      [pt.x - 2, pt.y - 2],
-      [pt.x + 2, pt.y + 2],
-    ];
-    const layers = [...NGII_LAYERS, OSM_OUTSIDE_LAYER, OSM_STRADDLE_LAYER].filter(
-      (id) => map.getLayer(id),
-    );
-    const hits = map.queryRenderedFeatures(box, { layers });
+    const at = (id) =>
+      map.getLayer(id)
+        ? map.queryRenderedFeatures(pt, { layers: [id] })
+        : [];
     return {
-      ngii: hits.filter((h) => NGII_LAYERS.includes(h.layer.id)).length,
-      osm: hits.filter((h) => !NGII_LAYERS.includes(h.layer.id)).length,
+      site: at(SITE_LAYER).map((f) => ({ ...f.properties })),
+      osm: at(OSM_OUTSIDE_LAYER).length,
     };
   },
-  /**
-   * The whole configuration table as JSON - every zone that has been
-   * configured, whether or not its update is currently applied.
-   *
-   * This is the project's answer to "where do edits live". The DB is
-   * read-only, so nothing can be written back; a config file instead makes
-   * a run reproducible, reviewable and diffable, and is the same shape
-   * mirofish will eventually emit.
-   */
-  exportConfig() {
-    return JSON.stringify(
-      {
-        version: 1,
-        zones: [...configs.values()],
-        applied: [...buildings.zoneUpdates.keys()],
-      },
-      null,
-      2,
-    );
-  },
-  /**
-   * Load a configuration table and apply the zones it marks as applied.
-   * Replaces the current table rather than merging - a file describes a
-   * whole scenario, and half of one is not a scenario.
-   */
-  importConfig(json) {
-    const data = typeof json === "string" ? JSON.parse(json) : json;
-    if (!Array.isArray(data?.zones)) throw new Error("zones[] missing");
-
-    viewer.resetZone(null, false);
-    configs.clear();
-    lastReports.clear();
-    for (const config of data.zones) {
-      if (typeof config.zone_fid !== "number") continue;
-      configs.set(config.zone_fid, config);
-    }
-
-    const applied = [];
-    const failed = [];
-    for (const fid of data.applied ?? []) {
-      const config = configs.get(fid);
-      if (!config) continue;
-      const report = viewer.applyZoneUpdate(config, false);
-      lastReports.set(fid, report);
-      (report.error || !report.applied ? failed : applied).push(fid);
-    }
-    buildings.refresh();
-    if (zones.selected !== null) showZone(zones.selected);
-    return { zones: configs.size, applied, failed };
-  },
-  /** The editable configuration table, for tests to inspect directly. */
-  configs,
 };
 
 window.__viewer = viewer;
 
-function comparisonScenarioPayload(data) {
+$("show-zones").addEventListener("change", (event) => {
+  zones.setVisible(event.target.checked);
+});
+
+function scenarioPayload() {
+  if (!scenarioConfig) return null;
   return {
-    ...data,
-    zones: data.zones.map((zone) => {
-      const props = zones.get(zone.zone_fid);
-      const update = buildings.zoneUpdates.get(zone.zone_fid);
+    ...scenarioConfig,
+    zones: scenarioConfig.zones.map((zone) => {
+      const sim = simZones.get(zone.zone_fid);
       return {
         ...zone,
-        label: props ? `구역 ${props.zone_dtl || props.zone}` : `fid ${zone.zone_fid}`,
-        demolished: buildings.originalIn(zone.zone_fid).length,
-        report: lastReports.get(zone.zone_fid) ?? null,
-        masses: (update?.features ?? []).map((feature) => ({
+        label: zoneLabel(zone.zone_fid),
+        demolished: (data?.features ?? []).filter(
+          (feature) => feature.properties.zone_fid === zone.zone_fid,
+        ).length,
+        report: sim?.report ?? null,
+        masses: (sim?.features ?? []).map((feature) => ({
           ...feature.properties,
         })),
       };
@@ -704,87 +937,13 @@ function comparisonScenarioPayload(data) {
   };
 }
 
-function setScenarioVisible(visible) {
-  scenarioVisible = Boolean(visible);
-  if (!comparisonScenarioConfig) return scenarioVisible;
-  if (scenarioVisible) viewer.importConfig(comparisonScenarioConfig);
-  else viewer.resetZone(null);
-  document.documentElement.dataset.scenario = scenarioVisible ? "applied" : "hidden";
-  return scenarioVisible;
-}
-
-function renderScenarioPanel(data) {
-  const panel = $("scenario-panel");
-  const applied = new Set(data.applied ?? []);
-  const zonesToShow = data.zones.filter((zone) => applied.has(zone.zone_fid));
-  const basis = zonesToShow[0]?.scenario_basis ?? "적용 시나리오";
-  const statusText = zonesToShow[0]?.agreement_status ?? "상태 미정";
-
-  $("scenario-title").textContent = basis;
-  $("scenario-applied").textContent = `적용 구역 ${[...applied].join(" · ")}`;
-  $("scenario-status").textContent = statusText;
-
-  const zoneList = $("scenario-zones");
-  zoneList.replaceChildren();
-  for (const zone of zonesToShow) {
-    const section = document.createElement("section");
-    section.className = "scenario-zone";
-
-    const head = document.createElement("div");
-    head.className = "scenario-zone-head";
-    const title = document.createElement("h2");
-    title.textContent = `구역 ${zone.zone_fid}`;
-    const green = document.createElement("span");
-    green.className = "scenario-green";
-    green.textContent = `녹지 비율 ${Number(zone.green_ratio * 100).toFixed(0)}%`;
-    head.append(title, green);
-    section.append(head);
-
-    for (const building of zone.buildings ?? []) {
-      const item = document.createElement("div");
-      item.className = "scenario-building";
-      const name = document.createElement("strong");
-      name.className = "scenario-building-name";
-      name.textContent = building.use;
-      const facts = document.createElement("span");
-      facts.className = "scenario-building-facts";
-      const placement = building.anchor
-        ? ` · 배치 ${building.anchor}`
-        : Number.isFinite(building.aspect)
-          ? ` · 종횡비 ${building.aspect}`
-          : "";
-      facts.textContent =
-        `${building.floors}층 · 용적률 ${building.far}% · ${building.count}동${placement}`;
-      item.append(name, facts);
-      if (building.note) {
-        const note = document.createElement("span");
-        note.className = "scenario-building-note";
-        note.textContent = building.note;
-        item.append(note);
-      }
-      section.append(item);
-    }
-    zoneList.append(section);
-  }
-
-  panel.hidden = false;
-}
-
-try {
-  const scenarioResponse = await fetch("./zone_config.json", { cache: "no-store" });
-  if (!scenarioResponse.ok) throw new Error(`HTTP ${scenarioResponse.status}`);
-  const scenarioConfig = await scenarioResponse.json();
-  viewer.importConfig(scenarioConfig);
-  comparisonScenarioConfig = scenarioConfig;
-  comparisonScenario = comparisonScenarioPayload(scenarioConfig);
-  renderScenarioPanel(scenarioConfig);
-  document.documentElement.dataset.scenario = "applied";
-} catch (err) {
-  status(`${$("status").textContent} · 시나리오 적용 실패`);
-  console.error(`scenario unavailable: ${err.message}`);
-}
-
-startComparisonBridge(map, "after", {
-  scenario: comparisonScenario,
-  setScenarioVisible,
+startComparisonBridge(map, SNAPSHOT, {
+  getStats: stats,
+  scenario: SNAPSHOT === "after" ? scenarioPayload() : null,
+  setScenarioVisible: (visible) => viewer.setSimVisible(visible),
 });
+
+// After `viewer` exists: renderSimPanel is safe earlier (a hoisted
+// function), but the listeners above call viewer methods, so the first
+// paint belongs here rather than at load time.
+renderSimPanel();

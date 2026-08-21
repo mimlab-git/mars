@@ -25,7 +25,6 @@ export function startComparisonBridge(map, snapshot, options = {}) {
 
   let applyingRemoteCamera = false;
   let applyingRemoteControl = false;
-  let framePending = false;
   let scheduleStats = () => {};
   const syncedControls = ["swap", "show-zones"];
 
@@ -40,19 +39,59 @@ export function startComparisonBridge(map, snapshot, options = {}) {
   }
 
   function sendCamera() {
-    framePending = false;
     if (applyingRemoteCamera) return;
+    const camera = cameraState();
+    try {
+      const directRelay = window.parent.__mimlabRelayGisCamera;
+      if (typeof directRelay === "function" && directRelay(snapshot, camera)) {
+        return;
+      }
+    } catch {
+      // Cross-origin parent. Continue with the asynchronous bridge below.
+    }
     window.parent.postMessage(
-      { type: "mimlab:gis-camera", snapshot, camera: cameraState() },
+      { type: "mimlab:gis-camera", snapshot, camera },
       targetOrigin || "*",
     );
   }
 
+  function isValidCamera(camera) {
+    return Boolean(
+      Array.isArray(camera?.center) &&
+        camera.center.length === 2 &&
+        camera.center.every(Number.isFinite) &&
+        [camera.zoom, camera.pitch, camera.bearing].every(Number.isFinite)
+    );
+  }
+
+  function applyRemoteCamera(camera) {
+    if (!isValidCamera(camera)) return false;
+    applyingRemoteCamera = true;
+    try {
+      map.jumpTo(camera);
+    } finally {
+      applyingRemoteCamera = false;
+    }
+    return true;
+  }
+
+  // Same-origin comparison mounts call this synchronously from the active
+  // map's pointer event. Both canvases then paint the new camera in the
+  // same browser frame. Cross-origin viewers cannot access it and retain
+  // the postMessage path.
+  window.__mimlabApplyCamera = applyRemoteCamera;
+
   map.on("move", () => {
-    if (applyingRemoteCamera || framePending) return;
-    framePending = true;
-    requestAnimationFrame(sendCamera);
+    // MapLibre emits `move` before painting its next frame. Forwarding the
+    // camera immediately lets the peer apply it before that same frame.
+    // The previous extra requestAnimationFrame made the passive map trail
+    // by at least one full frame and visibly reduced its apparent FPS.
+    sendCamera();
   });
+  // Inertial pan/zoom can end between animation frames. Re-send the final
+  // authoritative camera so tiny rounding or resize differences cannot
+  // remain after the gesture settles.
+  map.on("moveend", sendCamera);
 
   if (typeof options.getStats === "function") {
     const sendStats = () => {
@@ -127,21 +166,7 @@ export function startComparisonBridge(map, snapshot, options = {}) {
 
     if (event.data?.type !== "mimlab:gis-set-camera") return;
 
-    const camera = event.data.camera;
-    if (
-      !Array.isArray(camera?.center) ||
-      camera.center.length !== 2 ||
-      !camera.center.every(Number.isFinite) ||
-      ![camera.zoom, camera.pitch, camera.bearing].every(Number.isFinite)
-    ) {
-      return;
-    }
-
-    applyingRemoteCamera = true;
-    map.jumpTo(camera);
-    requestAnimationFrame(() => {
-      applyingRemoteCamera = false;
-    });
+    applyRemoteCamera(event.data.camera);
   });
 
   window.parent.postMessage(
