@@ -1,0 +1,53 @@
+{
+  "_note": "Standard camera views for the MapLibre viewer, passed to __viewer.flyTo(). MapLibre keys: center [lon,lat], zoom, pitch (0-85, degrees down from vertical), bearing. These replaced Cesium's lon/lat/height/heading/pitch, which MapLibre silently ignored - every view resolved to zoom 14.8 pitch 0, so they all framed the same thing. Verified to render as described; update in the same commit as any viewer change.",
+
+  "default": {
+    "description": "The whole 9-sheet grid, oblique from the south-west",
+    "center": [126.9875, 37.5625],
+    "zoom": 12.6,
+    "pitch": 50,
+    "bearing": 15
+  },
+  "overview": {
+    "description": "The 9-sheet grid flat on, the full 55.19 km2 of NGII coverage",
+    "center": [126.9875, 37.5625],
+    "zoom": 12.2,
+    "pitch": 0,
+    "bearing": 0
+  },
+  "west_edge": {
+    "description": "The western sheet boundary at 126.95 - OSM on the left, NGII on the right. The swap check.",
+    "center": [126.9525, 37.558],
+    "zoom": 15.4,
+    "pitch": 45,
+    "bearing": 0
+  },
+  "city_centre": {
+    "description": "City Hall and Myeongdong, the densest part of the grid",
+    "center": [126.986, 37.5665],
+    "zoom": 15.6,
+    "pitch": 50,
+    "bearing": 20
+  },
+  "namsan": {
+    "description": "Namsan (270.9 m) from the north, skyline against the slope",
+    "center": [126.9877, 37.5516],
+    "zoom": 14.4,
+    "pitch": 60,
+    "bearing": 180
+  },
+  "bukaksan": {
+    "description": "Bukaksan (342.2 m) and the northern sheets",
+    "center": [126.9737, 37.575],
+    "zoom": 14.0,
+    "pitch": 55,
+    "bearing": 10
+  },
+  "han_river": {
+    "description": "Han River along the southern edge of the grid",
+    "center": [126.995, 37.53],
+    "zoom": 13.6,
+    "pitch": 55,
+    "bearing": 20
+  }
+}

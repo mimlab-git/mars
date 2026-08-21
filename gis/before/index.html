@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <title>MIMLAB lightweight GIS comparison</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css"
+    />
+    <script>
+      if (window.parent !== window) document.documentElement.classList.add("comparison-embed");
+    </script>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        font-family:
+          "Segoe UI", "Malgun Gothic", system-ui, sans-serif;
+        font-size: 12px;
+      }
+      #map {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+      }
+      .viewer-ready #map {
+        opacity: 1;
+      }
+      .panel {
+        position: absolute;
+        z-index: 1;
+        background: rgba(255, 255, 255, 0.94);
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        padding: 10px 12px;
+        box-shadow: 0 1px 4px rgba(0, 0, 0, 0.2);
+      }
+      #controls {
+        top: 10px;
+        left: 10px;
+        width: 210px;
+      }
+      .legend {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin: 3px 0;
+        color: #444;
+      }
+      .swatch {
+        width: 11px;
+        height: 11px;
+        border-radius: 2px;
+        flex: none;
+      }
+      .legend .count {
+        margin-left: auto;
+        color: #999;
+      }
+      #status {
+        margin-top: 8px;
+        padding-top: 6px;
+        border-top: 1px solid #eee;
+        color: #777;
+      }
+      #sim-panel {
+        top: 10px;
+        right: 10px;
+        width: 262px;
+        max-height: calc(100vh - 20px);
+        overflow-y: auto;
+      }
+      .sim-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .sim-head h1 {
+        margin: 0;
+        font-size: 13px;
+        font-weight: 600;
+      }
+      .sim-switch {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        color: #555;
+        white-space: nowrap;
+      }
+      #sim-meta {
+        margin-top: 4px;
+        color: #777;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      #sim-body {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #eee;
+      }
+      .zone-card {
+        margin-bottom: 12px;
+      }
+      .zone-card:last-child {
+        margin-bottom: 0;
+      }
+      .zone-name {
+        font-weight: 600;
+        color: #333;
+        margin-bottom: 3px;
+      }
+      .zone-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        color: #666;
+        font-size: 11px;
+        line-height: 1.65;
+      }
+      .zone-row .v {
+        color: #333;
+        text-align: right;
+      }
+      .mass-chip {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-top: 3px;
+        font-size: 11px;
+        color: #555;
+      }
+      .mass-chip .swatch {
+        width: 9px;
+        height: 9px;
+      }
+      .sim-hint {
+        margin-top: 8px;
+        color: #999;
+        font-size: 11px;
+      }
+      .back-link {
+        display: inline-block;
+        margin-bottom: 6px;
+        color: #2c6fb3;
+        cursor: pointer;
+        font-size: 11px;
+      }
+      .back-link:hover {
+        text-decoration: underline;
+      }
+      .detail-title {
+        font-weight: 600;
+        color: #333;
+        margin-bottom: 4px;
+      }
+      .detail-note {
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top: 1px solid #eee;
+        color: #a06000;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      #debug-panel {
+        bottom: 10px;
+        left: 10px;
+        font-family: ui-monospace, Consolas, monospace;
+        font-size: 11px;
+        white-space: pre;
+        color: #333;
+      }
+      .comparison-embed #controls,
+      .comparison-embed #sim-panel,
+      .comparison-embed #debug-panel,
+      #show-zones {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="map"></div>
+    <input id="show-zones" type="checkbox" checked />
+
+    <div id="controls" class="panel">
+      <div id="legend"></div>
+      <div id="status">초기화 중...</div>
+    </div>
+
+    <!-- The mirofish scenario: a toggle, a per-zone summary, and the
+         detail of whichever building is clicked. -->
+    <div id="sim-panel" class="panel">
+      <div class="sim-head">
+        <h1>mirofish 시뮬레이션</h1>
+        <label class="sim-switch">
+          <input id="sim-toggle" type="checkbox" checked />
+          표시
+        </label>
+      </div>
+      <div id="sim-meta"></div>
+      <div id="sim-body"></div>
+    </div>
+
+    <div id="debug-panel" class="panel">loading</div>
+
+    <script src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

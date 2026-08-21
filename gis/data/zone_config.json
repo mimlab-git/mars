@@ -1,0 +1,53 @@
+{
+  "zones": [
+    {
+      "zone_fid": 35,
+      "green_ratio": 0.15,
+      "buildings": [
+        {
+          "use": "업무시설",
+          "far": 562.5,
+          "floors": 25,
+          "count": 1,
+          "anchor": "S"
+        },
+        {
+          "use": "판매시설",
+          "far": 54.3,
+          "floors": 15,
+          "count": 1,
+          "anchor": "N",
+          "note": "공공임대상가 17,503㎡, SH 제안, 종묘 방향 저층부"
+        },
+        {
+          "use": "근린생활시설",
+          "far": 202.5,
+          "floors": 15,
+          "count": 1,
+          "anchor": "N"
+        }
+      ],
+      "scenario_basis": "Scenario C (다자 원탁 절충안)",
+      "agreement_status": "조건부 합의"
+    },
+    {
+      "zone_fid": 46,
+      "green_ratio": 0.15,
+      "buildings": [
+        {
+          "use": "근린생활시설",
+          "far": 225.0,
+          "floors": 5,
+          "count": 1,
+          "aspect": 0.5
+        }
+      ],
+      "scenario_basis": "Scenario C (다자 원탁 절충안)",
+      "agreement_status": "조건부 합의"
+    }
+  ],
+  "applied": [
+    35,
+    46
+  ]
+}
