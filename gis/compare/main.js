@@ -41,7 +41,29 @@ export const SITE_LAYER = "site-3d";
 export const AFTER_SITE_SOURCE = "site-buildings-after";
 export const AFTER_SITE_LAYER = "site-3d-after";
 
-const map = await createMap("map");
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.json();
+}
+
+// Start every independent network request together. MapLibre still needs its
+// style before layers can be added, but local data does not need to wait for
+// the remote style request to finish.
+const mapReady = createMap("map");
+const siteDataReady = fetchJson(
+  new URL("../data/site_buildings.geojson", import.meta.url),
+);
+const zoneDataReady = fetchJson(
+  new URL("../data/zones.geojson", import.meta.url),
+);
+const scenarioDataReady = SNAPSHOT === "before"
+  ? Promise.resolve(null)
+  : fetchJson(new URL("../data/zone_config.json", import.meta.url), {
+      cache: "no-store",
+    });
+
+const map = await mapReady;
 const zones = new Zones(map);
 
 const firstSymbol = map
@@ -347,8 +369,23 @@ function addOsmOutsideZones(zoneUnion) {
   return () => {
     if (started) return;
     started = true;
-    map.on("idle", refresh);
+
+    // Scan current tiles immediately, then once more when startup settles.
+    // Future camera moves get one final scan after their new tiles arrive.
+    // Do not bind refresh permanently to `idle`: setFilter, terrain, and
+    // unrelated repaints also emit idle and used to re-arm this work.
+    let idlePending = false;
+    const refreshWhenIdle = () => {
+      if (idlePending) return;
+      idlePending = true;
+      map.once("idle", () => {
+        idlePending = false;
+        refresh();
+      });
+    };
+    map.on("moveend", refreshWhenIdle);
     refresh();
+    refreshWhenIdle();
   };
 }
 
@@ -483,11 +520,7 @@ status("건물 불러오는 중...");
 let data = null;
 let useLegend = [];
 try {
-  const res = await fetch(
-    new URL("../data/site_buildings.geojson", import.meta.url),
-  );
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  data = await res.json();
+  data = await siteDataReady;
   for (const f of data.features) {
     f.properties.height_m = heightOf(f.properties);
     f.properties.area_m2 = Math.round(footprintArea(f));
@@ -519,7 +552,7 @@ try {
 
 let startSurroundMasking = null;
 try {
-  await zones.load();
+  zones.data = await zoneDataReady;
   zones.addLayers(SITE_LAYER);
 
   // One MultiPolygon of every zone, for the `within` filter. No real
@@ -555,12 +588,7 @@ try {
  */
 if (SNAPSHOT !== "before") {
   try {
-    const res = await fetch(
-      new URL("../data/zone_config.json", import.meta.url),
-      { cache: "no-store" },
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const cfg = await res.json();
+    const cfg = await scenarioDataReady;
     scenarioConfig = cfg;
     if (!Array.isArray(cfg?.zones)) throw new Error("zones[] missing");
 
@@ -667,6 +695,22 @@ if (zones.data) {
   map.jumpTo({ ...cam, pitch: 55 });
 }
 document.documentElement.classList.add("viewer-ready");
+const startupResources = performance.getEntriesByType("resource");
+const resourceStart = (needle) =>
+  startupResources.find((entry) => entry.name.includes(needle))?.startTime;
+document.documentElement.dataset.viewerReadyMs = String(
+  Math.round(performance.now()),
+);
+for (const [name, needle] of [
+  ["styleStartMs", "styles/liberty"],
+  ["siteStartMs", "site_buildings.geojson"],
+  ["zonesStartMs", "zones.geojson"],
+]) {
+  const started = resourceStart(needle);
+  if (started !== undefined) {
+    document.documentElement.dataset[name] = String(Math.round(started));
+  }
+}
 
 // --- legend -----------------------------------------------------------
 //
@@ -1029,6 +1073,7 @@ startComparisonBridge(map, SNAPSHOT, {
   setScenarioVisible: (visible) => viewer.setSimVisible(visible),
   setComparisonPosition,
 });
+performance.mark("mimlab-viewer-ready");
 
 // After `viewer` exists: renderSimPanel is safe earlier (a hoisted
 // function), but the listeners above call viewer methods, so the first
