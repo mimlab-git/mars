@@ -46,11 +46,29 @@ export function scheduleTerrain(map) {
     }
   };
 
-  if ("requestIdleCallback" in window) {
-    window.requestIdleCallback(start, { timeout: 2000 });
-  } else {
-    window.setTimeout(start, 800);
+  const connection = navigator.connection;
+  const constrained = Boolean(
+    connection?.saveData ||
+      (navigator.deviceMemory && navigator.deviceMemory <= 4) ||
+      (navigator.hardwareConcurrency && navigator.hardwareConcurrency <= 4),
+  );
+
+  const startWhenIdle = () => {
+    if ("requestIdleCallback" in window) {
+      window.requestIdleCallback(start, { timeout: constrained ? 5000 : 2000 });
+    } else {
+      window.setTimeout(start, constrained ? 2500 : 800);
+    }
+  };
+
+  if (constrained) {
+    // Older hardware keeps the flat, useful model until the user chooses to
+    // explore it. Terrain then starts during the next idle window.
+    map.getCanvas().addEventListener("pointerdown", startWhenIdle, { once: true });
+    return;
   }
+
+  startWhenIdle();
 }
 
 /** Camera views from scripts/views.json, keyed by name. */
