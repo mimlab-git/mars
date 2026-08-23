@@ -44,6 +44,9 @@ export const AREA = (() => {
 /** Metres per storey. NGII gives floor counts, not heights. */
 export const DEFAULT_FLOOR_HEIGHT = 4.0;
 
+/** Keep contextual OSM buildings near the project, not across the basemap. */
+export const OSM_SURROUND_PADDING_M = 1500;
+
 /**
  * Metres per storey BY USE, for Track B, where the storey height is not a
  * slider but a property of what the building is. Keys are NGII vocabulary,

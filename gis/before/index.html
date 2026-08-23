@@ -4,10 +4,8 @@
     <meta charset="utf-8" />
     <title>MIMLAB lightweight GIS comparison</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link
-      rel="stylesheet"
-      href="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css"
-    />
+    <link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin />
+    <link rel="stylesheet" href="../vendor/maplibre-gl.css" />
     <script>
       if (window.parent !== window) document.documentElement.classList.add("comparison-embed");
     </script>
@@ -205,7 +203,7 @@
 
     <div id="debug-panel" class="panel">loading</div>
 
-    <script src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+    <script src="../vendor/maplibre-gl.js"></script>
     <script type="module" src="./main.js"></script>
   </body>
 </html>
