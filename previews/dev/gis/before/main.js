@@ -11,27 +11,35 @@ import {
   COLORS,
   LOD_STEPS,
   OSM_BUILDING_LAYERS,
+  OSM_SURROUND_PADDING_M,
   USE_STOREY_M,
 } from "./config.js";
 import {
   postComparisonBuilding,
   startComparisonBridge,
 } from "./comparison.js";
-import { createMap, waitIdle } from "./map.js";
+import { addComparisonCurtain } from "./curtain.js";
+import { createMap, scheduleTerrain, waitIdle } from "./map.js";
 import { intersectsArea } from "./swap.js";
 import { Zones } from "./zones.js";
 import { generateMassing, verifyInsideZone } from "./zoneupdate.js";
 
 const $ = (id) => document.getElementById(id);
-const SNAPSHOT = location.pathname.split("/").includes("after")
-  ? "after"
-  : "before";
+const pathParts = location.pathname.split("/");
+const IS_COMPARISON = pathParts.includes("compare");
+const SNAPSHOT = IS_COMPARISON
+  ? "compare"
+  : pathParts.includes("after")
+    ? "after"
+    : "before";
 const status = (text) => {
   $("status").textContent = text;
 };
 
 export const SITE_SOURCE = "site-buildings";
 export const SITE_LAYER = "site-3d";
+export const AFTER_SITE_SOURCE = "site-buildings-after";
+export const AFTER_SITE_LAYER = "site-3d-after";
 
 const map = await createMap("map");
 const zones = new Zones(map);
@@ -61,7 +69,7 @@ let lastScanMs = 0;
 const simZones = new Map();
 
 /** Whether the scenario is DRAWN. Hiding never discards it. */
-let simVisible = SNAPSHOT === "after";
+let simVisible = SNAPSHOT !== "before";
 $("sim-toggle").checked = simVisible;
 
 /** The scenario file's own metadata, for the panel header. */
@@ -91,6 +99,38 @@ function addOsmOutsideZones(zoneUnion) {
   for (const id of OSM_BUILDING_LAYERS) {
     if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", "none");
   }
+
+  const zoneBoxes = zoneUnion.coordinates.map((poly) => {
+    let minX = 180;
+    let minY = 90;
+    let maxX = -180;
+    let maxY = -90;
+    for (const [x, y] of poly[0]) {
+      if (x < minX) minX = x;
+      if (y < minY) minY = y;
+      if (x > maxX) maxX = x;
+      if (y > maxY) maxY = y;
+    }
+    return { minX, minY, maxX, maxY };
+  });
+  const siteBox = zoneBoxes.reduce((a, b) => ({
+    minX: Math.min(a.minX, b.minX),
+    minY: Math.min(a.minY, b.minY),
+    maxX: Math.max(a.maxX, b.maxX),
+    maxY: Math.max(a.maxY, b.maxY),
+  }));
+  const centerLat = (siteBox.minY + siteBox.maxY) / 2;
+  const lonPadding =
+    OSM_SURROUND_PADDING_M /
+    (111320 * Math.cos((centerLat * Math.PI) / 180));
+  const latPadding = OSM_SURROUND_PADDING_M / 110540;
+  const surroundBox = {
+    minX: siteBox.minX - lonPadding,
+    minY: siteBox.minY - latPadding,
+    maxX: siteBox.maxX + lonPadding,
+    maxY: siteBox.maxY + latPadding,
+  };
+
   map.addLayer(
     {
       id: OSM_OUTSIDE_LAYER,
@@ -101,9 +141,10 @@ function addOsmOutsideZones(zoneUnion) {
       // when its buildings appear (Track A lesson: do not override it).
       ...(template.minzoom === undefined ? {} : { minzoom: template.minzoom }),
       ...(template.maxzoom === undefined ? {} : { maxzoom: template.maxzoom }),
-      // `within` to begin with; maskInsideIds adds the id clause once
-      // tiles have been observed.
-      filter: ["!", ["within", zoneUnion]],
+      // Polygon features cannot use MapLibre's `within` expression. Start
+      // empty; the deferred tile scan builds an ID allowlist for buildings
+      // touching the project boundary's fixed 1.5 km buffer.
+      filter: ["in", ["id"], ["literal", []]],
       paint: {
         "fill-extrusion-color": COLORS.osm,
         "fill-extrusion-height": ["get", "render_height"],
@@ -157,26 +198,6 @@ function addOsmOutsideZones(zoneUnion) {
   // 3.6 s per scan and ran on every `idle`, which is the startup lag.
   // Nearly every building in view is nowhere near a zone, so a box test
   // rejects it for a few comparisons instead of a few thousand.
-  const zoneBoxes = zoneUnion.coordinates.map((poly) => {
-    let minX = 180;
-    let minY = 90;
-    let maxX = -180;
-    let maxY = -90;
-    for (const [x, y] of poly[0]) {
-      if (x < minX) minX = x;
-      if (y < minY) minY = y;
-      if (x > maxX) maxX = x;
-      if (y > maxY) maxY = y;
-    }
-    return { minX, minY, maxX, maxY };
-  });
-  const siteBox = zoneBoxes.reduce((a, b) => ({
-    minX: Math.min(a.minX, b.minX),
-    minY: Math.min(a.minY, b.minY),
-    maxX: Math.max(a.maxX, b.maxX),
-    maxY: Math.max(a.maxY, b.maxY),
-  }));
-
   const geomBox = (geometry) => {
     const polys =
       geometry.type === "MultiPolygon"
@@ -201,6 +222,7 @@ function addOsmOutsideZones(zoneUnion) {
 
   const state = {
     flags: new Map(),
+    allowed: new Set(),
     hidden: new Set(),
     parts: new Map(),
     seen: new Set(),
@@ -209,6 +231,7 @@ function addOsmOutsideZones(zoneUnion) {
     if (!map.getLayer(OSM_OUTSIDE_LAYER)) return 0;
     const started = performance.now();
     const before = state.hidden.size;
+    const allowedBefore = state.allowed.size;
     const found = map.querySourceFeatures(template.source, {
       sourceLayer: template.sourceLayer,
     });
@@ -241,6 +264,11 @@ function addOsmOutsideZones(zoneUnion) {
       // false and `spills` becomes true, which is what Track A's
       // intersectsArea/pieceFullyInside pair would have returned here.
       const box = geomBox(f.geometry);
+      if (!boxesOverlap(box, surroundBox)) {
+        flags.spills = true;
+        continue;
+      }
+      state.allowed.add(f.id);
       if (!boxesOverlap(box, siteBox)) {
         flags.spills = true;
         continue;
@@ -292,10 +320,13 @@ function addOsmOutsideZones(zoneUnion) {
       partsAdded += 1;
     }
 
-    if (state.hidden.size !== before) {
+    if (
+      state.hidden.size !== before ||
+      state.allowed.size !== allowedBefore
+    ) {
       map.setFilter(OSM_OUTSIDE_LAYER, [
         "all",
-        ["!", ["within", zoneUnion]],
+        ["in", ["id"], ["literal", [...state.allowed]]],
         ["!", ["in", ["id"], ["literal", [...state.hidden]]]],
       ]);
     }
@@ -312,9 +343,13 @@ function addOsmOutsideZones(zoneUnion) {
     lastScanMs = Math.round(performance.now() - started);
     return state.hidden.size - before;
   };
-  map.on("idle", refresh);
-  refresh();
-  return true;
+  let started = false;
+  return () => {
+    if (started) return;
+    started = true;
+    map.on("idle", refresh);
+    refresh();
+  };
 }
 
 /** Is every vertex of this piece inside the zones? Mirrors swap.js. */
@@ -373,7 +408,7 @@ function heightOf(properties) {
  * simulation restores the originals with no refetch. Same rule as Track
  * A's buildings._rendered().
  */
-function rendered() {
+function scenarioRendered() {
   if (!data) return { type: "FeatureCollection", features: [] };
   if (!simVisible || simZones.size === 0) return data;
   const replaced = new Set(simZones.keys());
@@ -384,9 +419,16 @@ function rendered() {
   return { type: "FeatureCollection", features };
 }
 
+function rendered() {
+  return SNAPSHOT === "before" ? data : scenarioRendered();
+}
+
 /** Push the current composition to the map. */
 function refreshSite() {
-  map.getSource(SITE_SOURCE)?.setData(rendered());
+  map.getSource(SITE_SOURCE)?.setData(
+    IS_COMPARISON ? data : rendered(),
+  );
+  map.getSource(AFTER_SITE_SOURCE)?.setData(scenarioRendered());
 }
 
 /** Signed shoelace area of a ring in m2; mirrors buildings.js ringArea. */
@@ -451,7 +493,10 @@ try {
     f.properties.area_m2 = Math.round(footprintArea(f));
   }
 
-  map.addSource(SITE_SOURCE, { type: "geojson", data: rendered() });
+  map.addSource(SITE_SOURCE, {
+    type: "geojson",
+    data: IS_COMPARISON ? data : rendered(),
+  });
   map.addLayer(
     {
       id: SITE_LAYER,
@@ -472,7 +517,7 @@ try {
   console.error(err);
 }
 
-let surroundReady = false;
+let startSurroundMasking = null;
 try {
   await zones.load();
   zones.addLayers(SITE_LAYER);
@@ -489,10 +534,10 @@ try {
         : [z.geometry.coordinates],
     ),
   };
-  surroundReady = addOsmOutsideZones(zoneUnion);
+  startSurroundMasking = addOsmOutsideZones(zoneUnion);
   // Ours on top: the surround was inserted at firstSymbol, which puts it
   // above the site layer added earlier.
-  if (surroundReady && map.getLayer(SITE_LAYER)) {
+  if (startSurroundMasking && map.getLayer(SITE_LAYER)) {
     map.moveLayer(SITE_LAYER, firstSymbol);
   }
   status(`${$("status").textContent} · 구역 ${zones.count()}개`);
@@ -508,55 +553,91 @@ try {
  * but it is reported, since a silently absent simulation looks exactly
  * like one with nothing in it.
  */
-try {
-  const res = await fetch(new URL("../data/zone_config.json", import.meta.url), {
-    cache: "no-store",
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const cfg = await res.json();
-  scenarioConfig = cfg;
-  if (!Array.isArray(cfg?.zones)) throw new Error("zones[] missing");
+if (SNAPSHOT !== "before") {
+  try {
+    const res = await fetch(
+      new URL("../data/zone_config.json", import.meta.url),
+      { cache: "no-store" },
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const cfg = await res.json();
+    scenarioConfig = cfg;
+    if (!Array.isArray(cfg?.zones)) throw new Error("zones[] missing");
 
-  const wanted = new Set(cfg.applied ?? cfg.zones.map((z) => z.zone_fid));
-  for (const config of cfg.zones) {
-    if (!wanted.has(config.zone_fid)) continue;
-    const zone = zones.data?.features.find((f) => f.id === config.zone_fid);
-    if (!zone) {
-      console.warn(`sim: no zone with fid ${config.zone_fid}`);
-      continue;
+    const wanted = new Set(cfg.applied ?? cfg.zones.map((z) => z.zone_fid));
+    for (const config of cfg.zones) {
+      if (!wanted.has(config.zone_fid)) continue;
+      const zone = zones.data?.features.find((f) => f.id === config.zone_fid);
+      if (!zone) {
+        console.warn(`sim: no zone with fid ${config.zone_fid}`);
+        continue;
+      }
+      const { features, report } = generateMassing(zone, config);
+      if (report.error) {
+        console.warn(`sim: zone ${config.zone_fid}: ${report.error}`);
+        continue;
+      }
+      // The engine's boundary rule holds here too: a mass that escaped its
+      // zone is reported, not drawn.
+      const check = verifyInsideZone(features, zone);
+      if (!check.ok) {
+        console.warn(
+          `sim: zone ${config.zone_fid} left its boundary (${check.outsideCount})`,
+        );
+        continue;
+      }
+      for (const f of features) {
+        // Track B's storey height, not the engine's flat 4.0 m default.
+        f.properties.height_m = heightOf(f.properties);
+        // Without this the LOD filter reads `area_m2` as missing and drops
+        // every generated mass the moment the camera pulls back.
+        f.properties.area_m2 ??= Math.round(footprintArea(f));
+      }
+      simZones.set(config.zone_fid, { features, report, config });
+      simMeta = {
+        scenario: config.scenario_basis ?? simMeta.scenario,
+        status: config.agreement_status ?? simMeta.status,
+      };
     }
-    const { features, report } = generateMassing(zone, config);
-    if (report.error) {
-      console.warn(`sim: zone ${config.zone_fid}: ${report.error}`);
-      continue;
-    }
-    // The engine's boundary rule holds here too: a mass that escaped its
-    // zone is reported, not drawn.
-    const check = verifyInsideZone(features, zone);
-    if (!check.ok) {
-      console.warn(
-        `sim: zone ${config.zone_fid} left its boundary (${check.outsideCount})`,
-      );
-      continue;
-    }
-    for (const f of features) {
-      // Track B's storey height, not the engine's flat 4.0 m default.
-      f.properties.height_m = heightOf(f.properties);
-      // Without this the LOD filter reads `area_m2` as missing and drops
-      // every generated mass the moment the camera pulls back.
-      f.properties.area_m2 ??= Math.round(footprintArea(f));
-    }
-    simZones.set(config.zone_fid, { features, report, config });
-    simMeta = {
-      scenario: config.scenario_basis ?? simMeta.scenario,
-      status: config.agreement_status ?? simMeta.status,
-    };
+    refreshSite();
+    status(`${$("status").textContent} · 시뮬레이션 ${simZones.size}개 구역`);
+  } catch (err) {
+    console.warn(`simulation unavailable: ${err.message}`);
+    status(`${$("status").textContent} · 시뮬레이션 없음`);
   }
-  refreshSite();
-  status(`${$("status").textContent} · 시뮬레이션 ${simZones.size}개 구역`);
-} catch (err) {
-  console.warn(`simulation unavailable: ${err.message}`);
-  status(`${$("status").textContent} · 시뮬레이션 없음`);
+}
+
+let comparisonPosition = 50;
+let setComparisonPosition = null;
+if (IS_COMPARISON && data) {
+  map.addSource(AFTER_SITE_SOURCE, {
+    type: "geojson",
+    data: scenarioRendered(),
+  });
+  map.addLayer(
+    {
+      id: AFTER_SITE_LAYER,
+      type: "fill-extrusion",
+      source: AFTER_SITE_SOURCE,
+      filter: zoomFilter(),
+      paint: {
+        "fill-extrusion-color": useColorExpression(),
+        "fill-extrusion-height": ["get", "height_m"],
+        "fill-extrusion-opacity": 0.95,
+      },
+    },
+    firstSymbol,
+  );
+  const applyComparisonPosition = addComparisonCurtain(
+    map,
+    SITE_LAYER,
+    AFTER_SITE_LAYER,
+    firstSymbol,
+  );
+  setComparisonPosition = (next) => {
+    comparisonPosition = applyComparisonPosition(next);
+    return comparisonPosition;
+  };
 }
 
 // Frame the site: the camera the page opens on is computed from the zones
@@ -758,17 +839,22 @@ $("sim-toggle").addEventListener("change", (e) => {
 
 // Click a building to inspect it; click empty ground to go back.
 map.on("click", (e) => {
-  const hits = map.queryRenderedFeatures(e.point, { layers: [SITE_LAYER] });
+  const split = map.getCanvas().clientWidth * (comparisonPosition / 100);
+  const layers =
+    IS_COMPARISON && e.point.x >= split ? [AFTER_SITE_LAYER] : [SITE_LAYER];
+  const hits = map.queryRenderedFeatures(e.point, { layers });
   const building = hits.length ? { ...hits[0].properties } : null;
   viewer.selectBuilding(building);
   postComparisonBuilding(SNAPSHOT, building);
 });
-map.on("mouseenter", SITE_LAYER, () => {
-  map.getCanvas().style.cursor = "pointer";
-});
-map.on("mouseleave", SITE_LAYER, () => {
-  map.getCanvas().style.cursor = "";
-});
+for (const layer of [SITE_LAYER, IS_COMPARISON ? AFTER_SITE_LAYER : null].filter(Boolean)) {
+  map.on("mouseenter", layer, () => {
+    map.getCanvas().style.cursor = "pointer";
+  });
+  map.on("mouseleave", layer, () => {
+    map.getCanvas().style.cursor = "";
+  });
+}
 
 // --- debug panel + __viewer -------------------------------------------
 
@@ -939,11 +1025,23 @@ function scenarioPayload() {
 
 startComparisonBridge(map, SNAPSHOT, {
   getStats: stats,
-  scenario: SNAPSHOT === "after" ? scenarioPayload() : null,
+  scenario: SNAPSHOT !== "before" ? scenarioPayload() : null,
   setScenarioVisible: (visible) => viewer.setSimVisible(visible),
+  setComparisonPosition,
 });
 
 // After `viewer` exists: renderSimPanel is safe earlier (a hoisted
 // function), but the listeners above call viewer methods, so the first
 // paint belongs here rather than at load time.
 renderSimPanel();
+
+// Expensive visual refinement starts only after the useful viewer and its
+// parent bridge exist. This keeps first paint responsive on older CPUs/GPUs.
+if (startSurroundMasking) {
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(startSurroundMasking, { timeout: 1500 });
+  } else {
+    window.setTimeout(startSurroundMasking, 600);
+  }
+}
+scheduleTerrain(map);

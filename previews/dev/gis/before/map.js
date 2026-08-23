@@ -9,21 +9,48 @@ export async function createMap(container = "map") {
     style: BASEMAP_STYLE,
     ...CAMERA,
   });
-  await new Promise((resolve) => map.on("load", resolve));
-
-  // World terrain. No build step of our own: the DEM arrives as RGB-encoded
-  // raster tiles and the GPU turns them into relief. This replaces the
-  // quantized-mesh pipeline the project used to run for 10 minutes a build.
-  map.addSource("dem", {
-    type: "raster-dem",
-    tiles: [TERRAIN_TILES],
-    encoding: "terrarium",
-    tileSize: 256,
-    maxzoom: 15,
-  });
-  map.setTerrain({ source: "dem", exaggeration: 1 });
+  // The full `load` event waits for the first basemap tiles too. Our local
+  // GeoJSON layers only require the style graph, so let map tiles continue
+  // streaming while the useful site model is built.
+  await new Promise((resolve) => map.once("style.load", resolve));
 
   return map;
+}
+
+/**
+ * Add terrain after the useful map is already visible.
+ *
+ * The remote DEM is visual enhancement, not a prerequisite for the site
+ * model. Starting it on the critical path made both comparison frames fetch,
+ * decode, and upload terrain tiles while they were still booting.
+ */
+export function scheduleTerrain(map) {
+  let started = false;
+  const start = () => {
+    if (started || map.getSource("dem")) return;
+    started = true;
+
+    try {
+      // World terrain. The DEM arrives as RGB-encoded raster tiles and the
+      // GPU turns them into relief.
+      map.addSource("dem", {
+        type: "raster-dem",
+        tiles: [TERRAIN_TILES],
+        encoding: "terrarium",
+        tileSize: 256,
+        maxzoom: 15,
+      });
+      map.setTerrain({ source: "dem", exaggeration: 1 });
+    } catch (err) {
+      console.warn(`terrain unavailable (${err.message})`);
+    }
+  };
+
+  if ("requestIdleCallback" in window) {
+    window.requestIdleCallback(start, { timeout: 2000 });
+  } else {
+    window.setTimeout(start, 800);
+  }
 }
 
 /** Camera views from scripts/views.json, keyed by name. */
