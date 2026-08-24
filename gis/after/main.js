@@ -21,7 +21,7 @@ import {
 import { addComparisonCurtain } from "./curtain.js";
 import { createMap, scheduleTerrain, waitIdle } from "./map.js";
 import { intersectsArea } from "./swap.js";
-import { Zones } from "./zones.js";
+import { Zones, ZONES_SOURCE } from "./zones.js";
 import { generateMassing, verifyInsideZone } from "./zoneupdate.js";
 
 const $ = (id) => document.getElementById(id);
@@ -40,6 +40,23 @@ export const SITE_SOURCE = "site-buildings";
 export const SITE_LAYER = "site-3d";
 export const AFTER_SITE_SOURCE = "site-buildings-after";
 export const AFTER_SITE_LAYER = "site-3d-after";
+export const SELECTED_LAYER = "site-selected";
+export const AFTER_SELECTED_LAYER = "site-selected-after";
+export const SIM_ZONE_FILL_LAYER = "sim-zones-fill";
+export const SIM_ZONE_GLOW_LAYERS = [
+  "sim-zones-glow-3",
+  "sim-zones-glow-2",
+  "sim-zones-glow-1",
+];
+export const SIM_ZONE_LINE_LAYER = "sim-zones-outline";
+const SIM_ZONE_LAYERS = [
+  SIM_ZONE_FILL_LAYER,
+  ...SIM_ZONE_GLOW_LAYERS,
+  SIM_ZONE_LINE_LAYER,
+];
+const SIM_ZONE_COLOR = "#e11d2e";
+const SIM_ZONE_GLOW_COLOR = "#ff4d5a";
+const SELECT_COLOR = "#ffd24a";
 
 async function fetchJson(url, options) {
   const response = await fetch(url, options);
@@ -100,6 +117,54 @@ let scenarioConfig = null;
 
 /** Currently inspected building, or null for the per-zone summary. */
 let selectedBuilding = null;
+let selectedId = null;
+
+const GLOW_PULSE_MS = 2600;
+const GLOW_BASE_OPACITY = [0.2, 0.3, 0.45];
+let glowFrame = null;
+
+function startGlowPulse() {
+  if (glowFrame !== null) return;
+  const step = (now) => {
+    const k = 1 + 0.25 * Math.sin((now / GLOW_PULSE_MS) * 2 * Math.PI);
+    SIM_ZONE_GLOW_LAYERS.forEach((id, index) => {
+      if (map.getLayer(id)) {
+        map.setPaintProperty(id, "line-opacity", GLOW_BASE_OPACITY[index] * k);
+      }
+    });
+    glowFrame = requestAnimationFrame(step);
+  };
+  glowFrame = requestAnimationFrame(step);
+}
+
+function stopGlowPulse() {
+  if (glowFrame === null) return;
+  cancelAnimationFrame(glowFrame);
+  glowFrame = null;
+}
+
+function syncSelectionHighlight() {
+  const filter = [
+    "==",
+    ["to-string", ["get", "sel_id"]],
+    String(selectedId ?? -1),
+  ];
+  for (const id of [SELECTED_LAYER, AFTER_SELECTED_LAYER]) {
+    if (map.getLayer(id)) map.setFilter(id, filter);
+  }
+}
+
+function refreshSimZoneMark() {
+  const fids = [...simZones.keys()];
+  const filter = ["in", ["get", "fid"], ["literal", fids.length ? fids : [-1]]];
+  for (const id of SIM_ZONE_LAYERS) {
+    if (!map.getLayer(id)) continue;
+    map.setFilter(id, filter);
+    map.setLayoutProperty(id, "visibility", simVisible ? "visible" : "none");
+  }
+  if (simVisible && fids.length) startGlowPulse();
+  else stopGlowPulse();
+}
 
 /**
  * The swap, zone-scoped: OSM buildings everywhere EXCEPT inside a zone,
@@ -524,6 +589,7 @@ try {
   for (const f of data.features) {
     f.properties.height_m = heightOf(f.properties);
     f.properties.area_m2 = Math.round(footprintArea(f));
+    f.properties.sel_id = f.id ?? f.properties.gid;
   }
 
   map.addSource(SITE_SOURCE, {
@@ -544,6 +610,20 @@ try {
     },
     firstSymbol,
   );
+  map.addLayer(
+    {
+      id: SELECTED_LAYER,
+      type: "fill-extrusion",
+      source: SITE_SOURCE,
+      filter: ["==", ["to-string", ["get", "sel_id"]], "-1"],
+      paint: {
+        "fill-extrusion-color": SELECT_COLOR,
+        "fill-extrusion-height": ["get", "height_m"],
+        "fill-extrusion-opacity": 1,
+      },
+    },
+    firstSymbol,
+  );
   status(`건물 ${data.features.length.toLocaleString()}동`);
 } catch (err) {
   status(`건물 로드 실패: ${err.message}`);
@@ -554,6 +634,63 @@ let startSurroundMasking = null;
 try {
   zones.data = await zoneDataReady;
   zones.addLayers(SITE_LAYER);
+
+  map.addLayer(
+    {
+      id: SIM_ZONE_FILL_LAYER,
+      type: "fill",
+      source: ZONES_SOURCE,
+      filter: ["in", ["get", "fid"], ["literal", [-1]]],
+      paint: { "fill-color": SIM_ZONE_COLOR, "fill-opacity": 0.1 },
+    },
+    SITE_LAYER,
+  );
+  const glowStops = [
+    { width: 26, blur: 20, opacity: 0.4 },
+    { width: 14, blur: 10, opacity: 0.55 },
+    { width: 7, blur: 4, opacity: 0.7 },
+  ];
+  glowStops.forEach((stop, index) => {
+    map.addLayer(
+      {
+        id: SIM_ZONE_GLOW_LAYERS[index],
+        type: "line",
+        source: ZONES_SOURCE,
+        filter: ["in", ["get", "fid"], ["literal", [-1]]],
+        layout: { "line-join": "round", "line-cap": "round" },
+        paint: {
+          "line-color": SIM_ZONE_GLOW_COLOR,
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            13,
+            stop.width * 0.85,
+            18,
+            stop.width,
+          ],
+          "line-blur": stop.blur,
+          "line-opacity": stop.opacity,
+        },
+      },
+      firstSymbol,
+    );
+  });
+  map.addLayer(
+    {
+      id: SIM_ZONE_LINE_LAYER,
+      type: "line",
+      source: ZONES_SOURCE,
+      filter: ["in", ["get", "fid"], ["literal", [-1]]],
+      layout: { "line-join": "round", "line-cap": "round" },
+      paint: {
+        "line-color": SIM_ZONE_COLOR,
+        "line-width": 2.6,
+        "line-opacity": 1,
+      },
+    },
+    firstSymbol,
+  );
 
   // One MultiPolygon of every zone, for the `within` filter. No real
   // union is needed: the zones do not overlap (a building belongs to
@@ -572,6 +709,10 @@ try {
   // above the site layer added earlier.
   if (startSurroundMasking && map.getLayer(SITE_LAYER)) {
     map.moveLayer(SITE_LAYER, firstSymbol);
+    map.moveLayer(SELECTED_LAYER, firstSymbol);
+  }
+  for (const id of [...SIM_ZONE_GLOW_LAYERS, SIM_ZONE_LINE_LAYER]) {
+    if (map.getLayer(id)) map.moveLayer(id, firstSymbol);
   }
   status(`${$("status").textContent} · 구역 ${zones.count()}개`);
 } catch (err) {
@@ -620,6 +761,7 @@ if (SNAPSHOT !== "before") {
         // Without this the LOD filter reads `area_m2` as missing and drops
         // every generated mass the moment the camera pulls back.
         f.properties.area_m2 ??= Math.round(footprintArea(f));
+        f.properties.sel_id = f.id;
       }
       simZones.set(config.zone_fid, { features, report, config });
       simMeta = {
@@ -628,6 +770,7 @@ if (SNAPSHOT !== "before") {
       };
     }
     refreshSite();
+    refreshSimZoneMark();
     status(`${$("status").textContent} · 시뮬레이션 ${simZones.size}개 구역`);
   } catch (err) {
     console.warn(`simulation unavailable: ${err.message}`);
@@ -656,12 +799,31 @@ if (IS_COMPARISON && data) {
     },
     firstSymbol,
   );
+  map.addLayer(
+    {
+      id: AFTER_SELECTED_LAYER,
+      type: "fill-extrusion",
+      source: AFTER_SITE_SOURCE,
+      filter: ["==", ["to-string", ["get", "sel_id"]], "-1"],
+      paint: {
+        "fill-extrusion-color": SELECT_COLOR,
+        "fill-extrusion-height": ["get", "height_m"],
+        "fill-extrusion-opacity": 1,
+      },
+    },
+    firstSymbol,
+  );
   const applyComparisonPosition = addComparisonCurtain(
     map,
     SITE_LAYER,
     AFTER_SITE_LAYER,
     firstSymbol,
   );
+  // Zone marks describe the scenario as a whole, so keep them outside the
+  // WebGL scissor stack used only by before/after building extrusions.
+  for (const id of SIM_ZONE_LAYERS) {
+    if (map.getLayer(id)) map.moveLayer(id, firstSymbol);
+  }
   setComparisonPosition = (next) => {
     comparisonPosition = applyComparisonPosition(next);
     return comparisonPosition;
@@ -763,6 +925,34 @@ const zoneLabel = (fid) => {
 const row = (k, v) =>
   `<div class="zone-row"><span>${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
 
+const INFERRED_KR = {
+  far: "용적률",
+  floors: "층수",
+  count: "동수",
+  anchor: "배치",
+  aspect: "형상비",
+  use: "용도",
+  green_ratio: "녹지율",
+};
+
+function inferredEntries(object, prefix = "") {
+  return Object.entries(object?.inferred ?? {}).map(([key, basis]) => [
+    prefix + (INFERRED_KR[key] ?? key),
+    basis,
+  ]);
+}
+
+function inferredBlock(entries) {
+  if (!entries.length) return "";
+  const lines = entries
+    .map(([label, basis]) => `${esc(label)}: ${esc(basis)}`)
+    .join("<br>");
+  return (
+    `<div class="inferred-note"><span class="inferred-title">추론값 (보고서 미확정)</span>` +
+    `<br>${lines}</div>`
+  );
+}
+
 function renderSimSummary() {
   $("sim-meta").innerHTML = simMeta.scenario
     ? `${esc(simMeta.scenario)}<br>${esc(simMeta.status ?? "")}`
@@ -799,6 +989,12 @@ function renderSimSummary() {
         row("대지 / 가용", `${r.siteAreaM2.toLocaleString()} / ${r.buildableAreaM2.toLocaleString()}㎡`) +
         row("녹지 · 이격", `${Math.round(r.greenRatio * 100)}% · ${r.setbackM}m`) +
         masses +
+        inferredBlock([
+          ...inferredEntries(sim.config),
+          ...sim.config.buildings.flatMap((building) =>
+            inferredEntries(building, `${building.use} `),
+          ),
+        ]) +
         `</div>`,
     );
   }
@@ -864,7 +1060,11 @@ function renderBuildingDetail(props) {
       : "") +
     (entry?.anchor ? row("배치", anchorText[entry.anchor] ?? entry.anchor) : "") +
     (entry?.aspect ? row("형상비", `${entry.aspect} (남북 연장)`) : "") +
-    (entry?.note ? `<div class="detail-note">${esc(entry.note)}</div>` : "");
+    (entry?.note ? `<div class="detail-note">${esc(entry.note)}</div>` : "") +
+    inferredBlock([
+      ...inferredEntries(entry),
+      ...inferredEntries(sim?.config, "구역 "),
+    ]);
 }
 
 function renderSimPanel() {
@@ -950,7 +1150,13 @@ const stats = () => {
     osmStraddleDrawn: layerDrawnCount(OSM_STRADDLE_LAYER),
     osmMasked: maskedIds.size,
     maskScanMs: lastScanMs,
-    sim: { visible: simVisible, zones: simZones.size },
+    sim: {
+      visible: simVisible,
+      zones: simZones.size,
+      markedDrawn: layerDrawnCount(SIM_ZONE_LINE_LAYER),
+    },
+    selectedDrawn:
+      layerDrawnCount(SELECTED_LAYER) + layerDrawnCount(AFTER_SELECTED_LAYER),
     zonesLoaded: zones.count(),
     zonesDrawn: zones.drawnCount(),
     zoneTagged,
@@ -995,8 +1201,13 @@ const viewer = {
     simVisible = Boolean(visible);
     $("sim-toggle").checked = simVisible;
     refreshSite();
+    refreshSimZoneMark();
     // A detail view of a mass that is no longer drawn would be a lie.
-    if (!simVisible && selectedBuilding?.generated) selectedBuilding = null;
+    if (!simVisible && selectedBuilding?.generated) {
+      selectedBuilding = null;
+      selectedId = null;
+      syncSelectionHighlight();
+    }
     renderSimPanel();
     return simVisible;
   },
@@ -1009,6 +1220,12 @@ const viewer = {
         achievedFar: sim.report.achievedFar,
         targetFar: sim.report.targetFar,
         boundaryOk: true,
+        inferred: [
+          ...inferredEntries(sim.config),
+          ...sim.config.buildings.flatMap((building) =>
+            inferredEntries(building, `${building.use} `),
+          ),
+        ].map(([label]) => label),
       };
     }
     return { visible: simVisible, zones: out, meta: simMeta };
@@ -1016,9 +1233,24 @@ const viewer = {
   /** The full engine reports, for verification. */
   simReports: () =>
     Object.fromEntries([...simZones].map(([fid, s]) => [fid, s.report])),
+  setGlowPulse(on) {
+    if (on) {
+      startGlowPulse();
+      return true;
+    }
+    stopGlowPulse();
+    SIM_ZONE_GLOW_LAYERS.forEach((id, index) => {
+      if (map.getLayer(id)) {
+        map.setPaintProperty(id, "line-opacity", GLOW_BASE_OPACITY[index]);
+      }
+    });
+    return false;
+  },
   /** Inspect one building in the panel (null returns to the summary). */
   selectBuilding(props) {
     selectedBuilding = props ?? null;
+    selectedId = props ? (props.sel_id ?? props.gid ?? null) : null;
+    syncSelectionHighlight();
     renderSimPanel();
     return selectedBuilding;
   },
@@ -1071,6 +1303,7 @@ startComparisonBridge(map, SNAPSHOT, {
   getStats: stats,
   scenario: SNAPSHOT !== "before" ? scenarioPayload() : null,
   setScenarioVisible: (visible) => viewer.setSimVisible(visible),
+  selectBuilding: (building) => viewer.selectBuilding(building),
   setComparisonPosition,
 });
 performance.mark("mimlab-viewer-ready");

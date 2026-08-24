@@ -159,6 +159,12 @@ export function startComparisonBridge(map, snapshot, options = {}) {
       return;
     }
 
+    if (event.data?.type === "mimlab:gis-select-building") {
+      options.selectBuilding?.(event.data.building ?? null);
+      scheduleStats();
+      return;
+    }
+
     if (event.data?.type !== "mimlab:gis-set-camera") return;
 
     applyRemoteCamera(event.data.camera);

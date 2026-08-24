@@ -3,51 +3,108 @@
     {
       "zone_fid": 35,
       "green_ratio": 0.15,
+      "inferred": {
+        "green_ratio": "보고서에 수치 없음 (공원·통경축은 서술형) - 엔진 기본값 15% 유지"
+      },
       "buildings": [
         {
           "use": "업무시설",
-          "far": 562.5,
-          "floors": 25,
+          "far": 810.0,
+          "floors": 27,
           "count": 1,
-          "anchor": "S"
+          "anchor": "S",
+          "aspect": 0.83,
+          "note": "청계천변 고층 141.9m/27층 (2026.6.19 변경인가 고시), ZONE04_OFFICE_CHEONGGYE_SIDE",
+          "inferred": {
+            "far": "BCR 50% 차용(4구역 실발화 없음, 보고서 유일 발화 BCR) x mix 0.6 x 27층"
+          }
         },
         {
           "use": "판매시설",
-          "far": 54.3,
-          "floors": 15,
+          "far": 237.5,
+          "floors": 19,
           "count": 1,
           "anchor": "N",
-          "note": "공공임대상가 17,503㎡, SH 제안, 종묘 방향 저층부"
+          "aspect": 0.71,
+          "note": "종묘변 저층 98.7m/19층, 공공임대상가 141호(약 17,503㎡) 포함",
+          "inferred": {
+            "far": "BCR 50% 차용 x mix 0.25 x 19층"
+          }
         },
         {
-          "use": "근린생활시설",
-          "far": 202.5,
-          "floors": 15,
+          "use": "문화및집회시설",
+          "far": 142.5,
+          "floors": 19,
           "count": 1,
-          "anchor": "N"
+          "anchor": "N",
+          "aspect": 0.71,
+          "note": "역사박물관 18~19층, SH 공공성 논거",
+          "inferred": {
+            "far": "BCR 50% 차용 x mix 0.15 x 19층"
+          }
         }
       ],
-      "scenario_basis": "Scenario C (다자 원탁 절충안)",
+      "scenario_basis": "Scenario B",
       "agreement_status": "조건부 합의"
     },
     {
       "zone_fid": 46,
       "green_ratio": 0.15,
+      "inferred": {
+        "green_ratio": "보고서에 수치 없음 - 엔진 기본값 15% 유지"
+      },
       "buildings": [
         {
-          "use": "근린생활시설",
-          "far": 225.0,
-          "floors": 5,
+          "use": "업무시설",
+          "far": 1850.0,
+          "floors": 37,
           "count": 1,
-          "aspect": 0.5
+          "note": "GS건설 프라임오피스 203m/37층, 건폐율 50% 이하 (2026.6.19 변경인가 고시)",
+          "inferred": {
+            "far": "FAR 자체 발화 없음 - 고시 수치 조합(건폐율 상한 50% x 37층)으로 산출"
+          }
         }
       ],
-      "scenario_basis": "Scenario C (다자 원탁 절충안)",
+      "scenario_basis": "Scenario B",
+      "agreement_status": "합의"
+    },
+    {
+      "zone_fid": 21,
+      "green_ratio": 0.25,
+      "inferred": {
+        "green_ratio": "PJ호텔 철거 부지 공원화 합의(업계 반대 사유가 '개발 면적 감소') - 기본 15%에서 상향"
+      },
+      "buildings": [
+        {
+          "use": "업무시설",
+          "far": 1050.0,
+          "floors": 30,
+          "count": 1,
+          "note": "PJ호텔 통합 재개발, 업무 중심 (mix 0.7)",
+          "inferred": {
+            "floors": "보고서 미정(협의 필요) - 상한 203m(50층) 이내, 도시 벤치마크 중앙(총 1,500%)이 되는 30층. 밀도 극대화 주장측(건설·금융)이 반대측이므로 상한 최대치 배제",
+            "far": "BCR 50% 차용 x mix 0.7 x 30층(추론)"
+          }
+        },
+        {
+          "use": "판매시설",
+          "far": 450.0,
+          "floors": 30,
+          "count": 1,
+          "note": "신축 main_use_kr '업무시설, 판매시설' (mix 0.3)",
+          "inferred": {
+            "floors": "업무시설과 동일 근거 (통합 재개발 단일 사업)",
+            "far": "BCR 50% 차용 x mix 0.3 x 30층(추론)"
+          }
+        }
+      ],
+      "scenario_basis": "Scenario B",
       "agreement_status": "조건부 합의"
     }
   ],
   "applied": [
     35,
-    46
+    46,
+    21
   ]
 }
