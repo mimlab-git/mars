@@ -119,30 +119,6 @@ let scenarioConfig = null;
 let selectedBuilding = null;
 let selectedId = null;
 
-const GLOW_PULSE_MS = 2600;
-const GLOW_BASE_OPACITY = [0.2, 0.3, 0.45];
-let glowFrame = null;
-
-function startGlowPulse() {
-  if (glowFrame !== null) return;
-  const step = (now) => {
-    const k = 1 + 0.25 * Math.sin((now / GLOW_PULSE_MS) * 2 * Math.PI);
-    SIM_ZONE_GLOW_LAYERS.forEach((id, index) => {
-      if (map.getLayer(id)) {
-        map.setPaintProperty(id, "line-opacity", GLOW_BASE_OPACITY[index] * k);
-      }
-    });
-    glowFrame = requestAnimationFrame(step);
-  };
-  glowFrame = requestAnimationFrame(step);
-}
-
-function stopGlowPulse() {
-  if (glowFrame === null) return;
-  cancelAnimationFrame(glowFrame);
-  glowFrame = null;
-}
-
 function syncSelectionHighlight() {
   const filter = [
     "==",
@@ -162,8 +138,6 @@ function refreshSimZoneMark() {
     map.setFilter(id, filter);
     map.setLayoutProperty(id, "visibility", simVisible ? "visible" : "none");
   }
-  if (simVisible && fids.length) startGlowPulse();
-  else stopGlowPulse();
 }
 
 /**
@@ -645,6 +619,9 @@ try {
     },
     SITE_LAYER,
   );
+  // Keep the glow static. Mutating paint on every animation frame keeps
+  // MapLibre rendering forever, makes camera movement janky, and prevents
+  // the `idle` event that triggers the finished-tile OSM surround scan.
   const glowStops = [
     { width: 26, blur: 20, opacity: 0.4 },
     { width: 14, blur: 10, opacity: 0.55 },
@@ -1233,19 +1210,6 @@ const viewer = {
   /** The full engine reports, for verification. */
   simReports: () =>
     Object.fromEntries([...simZones].map(([fid, s]) => [fid, s.report])),
-  setGlowPulse(on) {
-    if (on) {
-      startGlowPulse();
-      return true;
-    }
-    stopGlowPulse();
-    SIM_ZONE_GLOW_LAYERS.forEach((id, index) => {
-      if (map.getLayer(id)) {
-        map.setPaintProperty(id, "line-opacity", GLOW_BASE_OPACITY[index]);
-      }
-    });
-    return false;
-  },
   /** Inspect one building in the panel (null returns to the summary). */
   selectBuilding(props) {
     selectedBuilding = props ?? null;
