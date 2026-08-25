@@ -10,6 +10,7 @@
 import {
   COLORS,
   LOD_STEPS,
+  MIN_DEMOLITION_AREA_M2,
   OSM_BUILDING_LAYERS,
   OSM_SURROUND_PADDING_M,
   USE_STOREY_M,
@@ -930,6 +931,14 @@ function inferredBlock(entries) {
   );
 }
 
+function demolitionCount(fid) {
+  return data.features.filter(
+    (feature) =>
+      feature.properties.zone_fid === fid &&
+      (feature.properties.area_m2 ?? 0) >= MIN_DEMOLITION_AREA_M2,
+  ).length;
+}
+
 function renderSimSummary() {
   $("sim-meta").innerHTML = simMeta.scenario
     ? `${esc(simMeta.scenario)}<br>${esc(simMeta.status ?? "")}`
@@ -944,9 +953,7 @@ function renderSimSummary() {
   const cards = [];
   for (const [fid, sim] of simZones) {
     const r = sim.report;
-    const demolished = data.features.filter(
-      (f) => f.properties.zone_fid === fid,
-    ).length;
+    const demolished = demolitionCount(fid);
     const masses = sim.features
       .map((f) => {
         const p = f.properties;
@@ -1251,9 +1258,7 @@ function scenarioPayload() {
       return {
         ...zone,
         label: zoneLabel(zone.zone_fid),
-        demolished: (data?.features ?? []).filter(
-          (feature) => feature.properties.zone_fid === zone.zone_fid,
-        ).length,
+        demolished: demolitionCount(zone.zone_fid),
         report: sim?.report ?? null,
         masses: (sim?.features ?? []).map((feature) => ({
           ...feature.properties,
