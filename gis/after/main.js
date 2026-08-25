@@ -19,7 +19,7 @@ import {
   postComparisonBuilding,
   startComparisonBridge,
 } from "./comparison.js";
-import { addComparisonCurtain } from "./curtain.js";
+import { addComparisonCurtain, LEFT_CLIP } from "./curtain.js";
 import { createMap, scheduleTerrain, waitIdle } from "./map.js";
 import { intersectsArea } from "./swap.js";
 import { Zones, ZONES_SOURCE } from "./zones.js";
@@ -87,6 +87,18 @@ const zones = new Zones(map);
 const firstSymbol = map
   .getStyle()
   .layers.find((l) => l.type === "symbol")?.id;
+
+/**
+ * Draw every basemap symbol before our extrusions so building faces hide
+ * road names, place labels, shields, and POIs behind them.
+ */
+function moveBasemapSymbolsBelow(anchorId) {
+  if (!anchorId || !map.getLayer(anchorId)) return;
+  const symbols = map
+    .getStyle()
+    .layers.filter((layer) => layer.type === "symbol");
+  for (const layer of symbols) map.moveLayer(layer.id, anchorId);
+}
 
 export const OSM_OUTSIDE_LAYER = "osm-outside-zones";
 export const OSM_STRADDLE_LAYER = "osm-straddle-zones";
@@ -580,7 +592,7 @@ try {
       paint: {
         "fill-extrusion-color": useColorExpression(),
         "fill-extrusion-height": ["get", "height_m"],
-        "fill-extrusion-opacity": 0.95,
+        "fill-extrusion-opacity": 1,
       },
     },
     firstSymbol,
@@ -772,7 +784,7 @@ if (IS_COMPARISON && data) {
       paint: {
         "fill-extrusion-color": useColorExpression(),
         "fill-extrusion-height": ["get", "height_m"],
-        "fill-extrusion-opacity": 0.95,
+        "fill-extrusion-opacity": 1,
       },
     },
     firstSymbol,
@@ -807,6 +819,11 @@ if (IS_COMPARISON && data) {
     return comparisonPosition;
   };
 }
+
+// Keep the original basemap hierarchy intact. Symbols sit above the subdued
+// OSM context but below the opaque project massing. In comparison mode they
+// must precede the left clip layer so the curtain never clips the labels.
+moveBasemapSymbolsBelow(IS_COMPARISON && data ? LEFT_CLIP : SITE_LAYER);
 
 // Frame the site: the camera the page opens on is computed from the zones
 // themselves, so a change to the site moves the framing with it.
