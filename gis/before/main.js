@@ -919,6 +919,8 @@ const zoneLabel = (fid) => {
 
 const row = (k, v) =>
   `<div class="zone-row"><span>${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
+const percent = (value) =>
+  Number(value).toLocaleString("ko-KR", { maximumFractionDigits: 1 });
 
 const INFERRED_KR = {
   far: "용적률",
@@ -985,7 +987,7 @@ function renderSimSummary() {
       `<div class="zone-card">` +
         `<div class="zone-name">${esc(zoneLabel(fid))} <span style="color:#999;font-weight:400">fid ${fid}</span></div>` +
         row("기존 → 신규", `${demolished}동 철거 → ${r.placed}동`) +
-        row("용적률", `${r.achievedFar}% / 목표 ${r.targetFar}%`) +
+        row("용적률", `${percent(r.achievedFar)}% / 목표 ${percent(r.targetFar)}%`) +
         row("연면적", `${r.achievedGfaM2.toLocaleString()}㎡`) +
         row("대지 / 가용", `${r.siteAreaM2.toLocaleString()} / ${r.buildableAreaM2.toLocaleString()}㎡`) +
         row("녹지 · 이격", `${Math.round(r.greenRatio * 100)}% · ${r.setbackM}m`) +
