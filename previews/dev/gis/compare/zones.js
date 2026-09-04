@@ -19,7 +19,8 @@
 
 import { pointInPolygon } from "./swap.js";
 
-const SOURCE = "zones-src";
+export const ZONES_SOURCE = "zones-src";
+const SOURCE = ZONES_SOURCE;
 export const ZONE_FILL_LAYER = "zones-fill";
 export const ZONE_LINE_LAYER = "zones-outline";
 export const ZONE_HIGHLIGHT_LAYER = "zone-buildings-highlight";

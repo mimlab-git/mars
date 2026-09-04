@@ -95,6 +95,13 @@ export const TERRAIN_TILES =
 /** The style's own building layers, hidden while a swap is active. */
 export const OSM_BUILDING_LAYERS = ["building", "building-3d"];
 
+/**
+ * Minimum footprint counted as a building demolished by the scenario.
+ * NGII includes 9 m² sheds as building features; excluding them makes an
+ * otherwise empty site read "0동 철거" instead of "2동 철거".
+ */
+export const MIN_DEMOLITION_AREA_M2 = 10;
+
 export const COLORS = {
   ngii: "#d33a2c",
   osm: "#9a9a9a",

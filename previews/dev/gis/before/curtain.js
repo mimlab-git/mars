@@ -3,7 +3,7 @@
 // Custom layers change WebGL's scissor rectangle for the translucent site
 // layers that follow them. Basemap, terrain, labels, and OSM render once.
 
-const LEFT_CLIP = "comparison-clip-left";
+export const LEFT_CLIP = "comparison-clip-left";
 const RIGHT_CLIP = "comparison-clip-right";
 const RESET_CLIP = "comparison-clip-reset";
 
