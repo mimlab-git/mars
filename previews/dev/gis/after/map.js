@@ -1,12 +1,53 @@
 // Map creation, world terrain, and camera helpers.
 
 import { BASEMAP_STYLE, CAMERA, CINEMATIC, COLORS, TERRAIN_TILES } from "./config.js";
+import { buildKosmStyle } from "./kosm-style.js";
 
 /** Create the map and wait until its style has loaded. */
 export async function createMap(container = "map") {
+  let snapshotBounds;
+  let cameraBounds;
+  if (BASEMAP_STYLE === "k-osm") {
+    try {
+      const response = await fetch(
+        new URL("../data/kosm-tiles/manifest.json", import.meta.url),
+      );
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const manifest = await response.json();
+      if (
+        Array.isArray(manifest.bounds) &&
+        manifest.bounds.length === 4 &&
+        manifest.bounds.every(Number.isFinite)
+      ) {
+        snapshotBounds = manifest.bounds;
+      }
+      if (
+        Array.isArray(manifest.camera_bounds) &&
+        manifest.camera_bounds.length === 4 &&
+        manifest.camera_bounds.every(Number.isFinite)
+      ) {
+        cameraBounds = manifest.camera_bounds;
+      }
+    } catch (error) {
+      console.warn(`K-OSM snapshot bounds unavailable (${error.message})`);
+    }
+  }
+
   const map = new maplibregl.Map({
     container,
-    style: BASEMAP_STYLE,
+    style:
+      BASEMAP_STYLE === "k-osm"
+        ? buildKosmStyle(snapshotBounds)
+        : BASEMAP_STYLE,
+    localIdeographFontFamily: "'Noto Sans KR', 'Apple SD Gothic Neo', sans-serif",
+    ...(cameraBounds
+      ? {
+          maxBounds: [
+            [cameraBounds[0], cameraBounds[1]],
+            [cameraBounds[2], cameraBounds[3]],
+          ],
+        }
+      : {}),
     ...CAMERA,
   });
   // The full `load` event waits for the first basemap tiles too. Our local
@@ -87,7 +128,7 @@ export async function loadViews() {
   }
 }
 
-/** OSM surround layers to tone down; ids match swap.js. */
+/** K-OSM surround layers to tone down; internal ids retain their old names. */
 const SURROUND_LAYERS = ["osm-outside", "osm-straddle"];
 
 /**

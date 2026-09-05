@@ -9,10 +9,10 @@
 
 import {
   COLORS,
+  BASEMAP_SURROUND_PADDING_M,
   LOD_STEPS,
   MIN_DEMOLITION_AREA_M2,
   OSM_BUILDING_LAYERS,
-  OSM_SURROUND_PADDING_M,
   USE_STOREY_M,
 } from "./config.js";
 import {
@@ -21,6 +21,7 @@ import {
 } from "./comparison.js";
 import { addComparisonCurtain, LEFT_CLIP } from "./curtain.js";
 import { createMap, scheduleTerrain, waitIdle } from "./map.js";
+import { estimateKosmBuildingScale } from "./kosm-style.js";
 import { intersectsArea } from "./swap.js";
 import { Zones, ZONES_SOURCE } from "./zones.js";
 import { generateMassing, verifyInsideZone } from "./zoneupdate.js";
@@ -103,6 +104,7 @@ function moveBasemapSymbolsBelow(anchorId) {
 export const OSM_OUTSIDE_LAYER = "osm-outside-zones";
 export const OSM_STRADDLE_LAYER = "osm-straddle-zones";
 const OSM_STRADDLE_SOURCE = "osm-straddle-zones-src";
+const KOSM_SELECTED_LAYER = "kosm-selected-building";
 
 /** OSM ids hidden because they touch a zone; see addOsmOutsideZones. */
 let maskedIds = new Set();
@@ -131,6 +133,7 @@ let scenarioConfig = null;
 /** Currently inspected building, or null for the per-zone summary. */
 let selectedBuilding = null;
 let selectedId = null;
+let selectedKosmId = null;
 
 function syncSelectionHighlight() {
   const filter = [
@@ -140,6 +143,13 @@ function syncSelectionHighlight() {
   ];
   for (const id of [SELECTED_LAYER, AFTER_SELECTED_LAYER]) {
     if (map.getLayer(id)) map.setFilter(id, filter);
+  }
+  if (map.getLayer(KOSM_SELECTED_LAYER)) {
+    map.setFilter(KOSM_SELECTED_LAYER, [
+      "in",
+      ["id"],
+      ["literal", selectedKosmId == null ? [] : [selectedKosmId]],
+    ]);
   }
 }
 
@@ -170,6 +180,14 @@ function addOsmOutsideZones(zoneUnion) {
     console.warn("style has no building-3d layer; surround unavailable");
     return false;
   }
+  const heightExpression = map.getPaintProperty(
+    "building-3d",
+    "fill-extrusion-height",
+  );
+  const baseExpression = map.getPaintProperty(
+    "building-3d",
+    "fill-extrusion-base",
+  );
   for (const id of OSM_BUILDING_LAYERS) {
     if (map.getLayer(id)) map.setLayoutProperty(id, "visibility", "none");
   }
@@ -195,9 +213,9 @@ function addOsmOutsideZones(zoneUnion) {
   }));
   const centerLat = (siteBox.minY + siteBox.maxY) / 2;
   const lonPadding =
-    OSM_SURROUND_PADDING_M /
+    BASEMAP_SURROUND_PADDING_M /
     (111320 * Math.cos((centerLat * Math.PI) / 180));
-  const latPadding = OSM_SURROUND_PADDING_M / 110540;
+  const latPadding = BASEMAP_SURROUND_PADDING_M / 110540;
   const surroundBox = {
     minX: siteBox.minX - lonPadding,
     minY: siteBox.minY - latPadding,
@@ -215,14 +233,15 @@ function addOsmOutsideZones(zoneUnion) {
       // when its buildings appear (Track A lesson: do not override it).
       ...(template.minzoom === undefined ? {} : { minzoom: template.minzoom }),
       ...(template.maxzoom === undefined ? {} : { maxzoom: template.maxzoom }),
-      // Polygon features cannot use MapLibre's `within` expression. Start
-      // empty; the deferred tile scan builds an ID allowlist for buildings
-      // touching the project boundary's fixed 1.5 km buffer.
-      filter: ["in", ["id"], ["literal", []]],
+      // The local source is already geographically bounded. Draw it
+      // immediately, then let the deferred scan remove zone-touching ids;
+      // starting empty left a visible 3D hole when local tiles loaded before
+      // the first idle callback.
+      filter: ["!", ["in", ["id"], ["literal", []]]],
       paint: {
         "fill-extrusion-color": COLORS.osm,
-        "fill-extrusion-height": ["get", "render_height"],
-        "fill-extrusion-base": ["get", "render_min_height"],
+        "fill-extrusion-height": heightExpression,
+        "fill-extrusion-base": baseExpression,
         "fill-extrusion-opacity": 0.55,
       },
     },
@@ -245,9 +264,28 @@ function addOsmOutsideZones(zoneUnion) {
       ...(template.maxzoom === undefined ? {} : { maxzoom: template.maxzoom }),
       paint: {
         "fill-extrusion-color": COLORS.osm,
-        "fill-extrusion-height": ["get", "render_height"],
-        "fill-extrusion-base": ["get", "render_min_height"],
+        "fill-extrusion-height": heightExpression,
+        "fill-extrusion-base": baseExpression,
         "fill-extrusion-opacity": 0.55,
+      },
+    },
+    firstSymbol,
+  );
+
+  map.addLayer(
+    {
+      id: KOSM_SELECTED_LAYER,
+      type: "fill-extrusion",
+      source: template.source,
+      "source-layer": template.sourceLayer,
+      ...(template.minzoom === undefined ? {} : { minzoom: template.minzoom }),
+      ...(template.maxzoom === undefined ? {} : { maxzoom: template.maxzoom }),
+      filter: ["in", ["id"], ["literal", []]],
+      paint: {
+        "fill-extrusion-color": SELECT_COLOR,
+        "fill-extrusion-height": heightExpression,
+        "fill-extrusion-base": baseExpression,
+        "fill-extrusion-opacity": 0.82,
       },
     },
     firstSymbol,
@@ -296,7 +334,6 @@ function addOsmOutsideZones(zoneUnion) {
 
   const state = {
     flags: new Map(),
-    allowed: new Set(),
     hidden: new Set(),
     parts: new Map(),
     seen: new Set(),
@@ -305,9 +342,8 @@ function addOsmOutsideZones(zoneUnion) {
     if (!map.getLayer(OSM_OUTSIDE_LAYER)) return 0;
     const started = performance.now();
     const before = state.hidden.size;
-    const allowedBefore = state.allowed.size;
-    const found = map.querySourceFeatures(template.source, {
-      sourceLayer: template.sourceLayer,
+    const found = map.queryRenderedFeatures({
+      layers: [OSM_OUTSIDE_LAYER],
     });
     /** Features actually examined this scan; the harvest works off these. */
     const examined = [];
@@ -317,8 +353,8 @@ function addOsmOutsideZones(zoneUnion) {
     for (const f of found) {
       if (f.id === undefined) continue;
       // Test each id ONCE per tile it arrives in, not once per scan.
-      // `querySourceFeatures` returns the same features again on every
-      // idle, and re-running the exact test on the ~80 near the site kept
+      // Render queries return the same features again after every source
+      // update, and re-running the exact test on the ~80 near the site kept
       // each scan at 288 ms no matter how little had changed. A tile key
       // in the seen-set lets a NEW tile still contribute its piece (which
       // is how a straddler gets promoted) while a repeat costs nothing.
@@ -342,7 +378,6 @@ function addOsmOutsideZones(zoneUnion) {
         flags.spills = true;
         continue;
       }
-      state.allowed.add(f.id);
       if (!boxesOverlap(box, siteBox)) {
         flags.spills = true;
         continue;
@@ -386,22 +421,15 @@ function addOsmOutsideZones(zoneUnion) {
         // Keep the OSM id, so a drawn part reports as the building it is.
         id: f.id,
         geometry: { type: "MultiPolygon", coordinates: keep },
-        properties: {
-          render_height: f.properties.render_height ?? 0,
-          render_min_height: f.properties.render_min_height ?? 0,
-        },
+        properties: { ...f.properties },
       });
       partsAdded += 1;
     }
 
-    if (
-      state.hidden.size !== before ||
-      state.allowed.size !== allowedBefore
-    ) {
+    if (state.hidden.size !== before) {
       map.setFilter(OSM_OUTSIDE_LAYER, [
-        "all",
-        ["in", ["id"], ["literal", [...state.allowed]]],
-        ["!", ["in", ["id"], ["literal", [...state.hidden]]]],
+        "!",
+        ["in", ["id"], ["literal", [...state.hidden]]],
       ]);
     }
     // Set every scan the harvest is non-empty: `parts` is rebuilt rather
@@ -422,22 +450,25 @@ function addOsmOutsideZones(zoneUnion) {
     if (started) return;
     started = true;
 
-    // Scan current tiles immediately, then once more when startup settles.
-    // Future camera moves get one final scan after their new tiles arrive.
-    // Do not bind refresh permanently to `idle`: setFilter, terrain, and
-    // unrelated repaints also emit idle and used to re-arm this work.
-    let idlePending = false;
-    const refreshWhenIdle = () => {
-      if (idlePending) return;
-      idlePending = true;
-      map.once("idle", () => {
-        idlePending = false;
+    // Scan only after the K-OSM source settles. Global `idle` is unreliable
+    // here because slow optional terrain can keep the whole map busy after
+    // the local vector tiles are already ready.
+    let refreshTimer = null;
+    const scheduleRefresh = () => {
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        refreshTimer = null;
         refresh();
-      });
+      }, 100);
     };
-    map.on("moveend", refreshWhenIdle);
-    refresh();
-    refreshWhenIdle();
+    map.on("sourcedata", (event) => {
+      if (event.sourceId === template.source && event.isSourceLoaded) {
+        scheduleRefresh();
+      }
+    });
+    map.on("moveend", scheduleRefresh);
+    // Fallback for a source that completed just before listener registration.
+    scheduleRefresh();
   };
 }
 
@@ -1014,6 +1045,27 @@ function renderBuildingDetail(props) {
     `<span class="swatch" style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${color};margin-right:5px"></span>` +
     `${esc(props.use || "(용도 없음)")}</div>`;
 
+  if (props.dataset === "K-OSM") {
+    const metric = (value, unit) =>
+      Number.isFinite(Number(value)) && Number(value) > 0
+        ? `${Number(value).toLocaleString(undefined, { maximumFractionDigits: 1 })}${unit}`
+        : "—";
+    $("sim-body").innerHTML =
+      back +
+      title +
+      row("데이터", "K-OSM") +
+      (props.name ? row("명칭", props.name) : "") +
+      row("주용도", props.use || "—") +
+      row("건물 유형", props.kind || "—") +
+      row("층수", props.floors ? `${props.floors}층` : "—") +
+      row("높이", metric(props.height_m, "m")) +
+      row("높이 산정", props.height_basis || "—") +
+      row("건축면적", metric(props.footprint_area_m2, "㎡")) +
+      row("연면적", metric(props.gross_floor_area_m2, "㎡")) +
+      row("K-OSM ID", props.id ?? "—");
+    return;
+  }
+
   const storey = USE_STOREY_M[props.use] ?? USE_STOREY_M._default;
   const common =
     row("층수 / 높이", `${props.floors}층 · ${props.height_m.toFixed(1)}m`) +
@@ -1084,17 +1136,48 @@ $("sim-toggle").addEventListener("change", (e) => {
   viewer.setSimVisible(e.target.checked);
 });
 
-// Click a building to inspect it; click empty ground to go back.
+function kosmBuildingProperties(feature) {
+  const raw = { ...feature.properties };
+  const scale = estimateKosmBuildingScale(raw);
+
+  return {
+    ...raw,
+    dataset: "K-OSM",
+    id: raw.id ?? feature.id,
+    name: raw.name ?? null,
+    use: raw["building:main_use"] ?? raw.building ?? null,
+    kind: raw.building ?? null,
+    floors: scale.floors,
+    height_m: scale.heightM,
+    height_basis: scale.heightBasis,
+    footprint_area_m2: scale.footprintAreaM2,
+    gross_floor_area_m2: scale.grossFloorAreaM2,
+    kosm_feature_id: feature.id ?? null,
+  };
+}
+
+// Click a project or K-OSM building to inspect it; click empty ground to go back.
 map.on("click", (e) => {
   const split = map.getCanvas().clientWidth * (comparisonPosition / 100);
-  const layers =
+  const siteLayers =
     IS_COMPARISON && e.point.x >= split ? [AFTER_SITE_LAYER] : [SITE_LAYER];
-  const hits = map.queryRenderedFeatures(e.point, { layers });
-  const building = hits.length ? { ...hits[0].properties } : null;
+  const siteHits = map.queryRenderedFeatures(e.point, { layers: siteLayers });
+  const kosmHits = map.getLayer(OSM_OUTSIDE_LAYER)
+    ? map.queryRenderedFeatures(e.point, { layers: [OSM_OUTSIDE_LAYER] })
+    : [];
+  const building = siteHits.length
+    ? { ...siteHits[0].properties }
+    : kosmHits.length
+      ? kosmBuildingProperties(kosmHits[0])
+      : null;
   viewer.selectBuilding(building);
   postComparisonBuilding(SNAPSHOT, building);
 });
-for (const layer of [SITE_LAYER, IS_COMPARISON ? AFTER_SITE_LAYER : null].filter(Boolean)) {
+for (const layer of [
+  SITE_LAYER,
+  IS_COMPARISON ? AFTER_SITE_LAYER : null,
+  OSM_OUTSIDE_LAYER,
+].filter(Boolean)) {
   map.on("mouseenter", layer, () => {
     map.getCanvas().style.cursor = "pointer";
   });
@@ -1239,7 +1322,12 @@ const viewer = {
   /** Inspect one building in the panel (null returns to the summary). */
   selectBuilding(props) {
     selectedBuilding = props ?? null;
-    selectedId = props ? (props.sel_id ?? props.gid ?? null) : null;
+    selectedId = props?.dataset === "K-OSM"
+      ? null
+      : props ? (props.sel_id ?? props.gid ?? null) : null;
+    selectedKosmId = props?.dataset === "K-OSM"
+      ? (props.kosm_feature_id ?? null)
+      : null;
     syncSelectionHighlight();
     renderSimPanel();
     return selectedBuilding;
@@ -1301,13 +1389,10 @@ performance.mark("mimlab-viewer-ready");
 // paint belongs here rather than at load time.
 renderSimPanel();
 
-// Expensive visual refinement starts only after the useful viewer and its
-// parent bridge exist. This keeps first paint responsive on older CPUs/GPUs.
+// Register before the fast local source can finish. The mask itself waits for
+// a source-complete event, so this does not put the expensive scan on first
+// paint and cannot be held up by optional terrain requests.
 if (startSurroundMasking) {
-  if ("requestIdleCallback" in window) {
-    window.requestIdleCallback(startSurroundMasking, { timeout: 1500 });
-  } else {
-    window.setTimeout(startSurroundMasking, 600);
-  }
+  startSurroundMasking();
 }
 scheduleTerrain(map);

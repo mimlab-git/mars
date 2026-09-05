@@ -44,8 +44,13 @@ export const AREA = (() => {
 /** Metres per storey. NGII gives floor counts, not heights. */
 export const DEFAULT_FLOOR_HEIGHT = 4.0;
 
-/** Keep contextual OSM buildings near the project, not across the basemap. */
-export const OSM_SURROUND_PADDING_M = 1500;
+/**
+ * Static K-OSM coverage beyond the project bounds.
+ * Three kilometres covers the oblique boss-demo camera without loading a
+ * city-wide building set. Snapshot generation and runtime masking share this
+ * value so neither can create a second, invisible cutoff.
+ */
+export const BASEMAP_SURROUND_PADDING_M = 3000;
 
 /**
  * Metres per storey BY USE, for Track B, where the storey height is not a
@@ -80,19 +85,20 @@ export const USE_STOREY_M = {
 export const CAMERA = {
   center: [126.99532, 37.56587],
   zoom: 15.76,
+  minZoom: 15,
   pitch: 55,
   bearing: -15,
   maxPitch: 85,
 };
 
-// External data. Both conflict with the project's isolation rule and are a
-// deployment decision, not a development one - see docs/M5_TRANSITION_PLAN.md
-// section 6.1.
-export const BASEMAP_STYLE = "https://tiles.openfreemap.org/styles/liberty";
+// K-OSM is assembled locally in map.js from a bounded static tile snapshot.
+// This keeps the experimental swap usable under Vite and static hosting;
+// k-osm.kr's public vector-tile endpoint does not allow arbitrary origins.
+export const BASEMAP_STYLE = "k-osm";
 export const TERRAIN_TILES =
   "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
 
-/** The style's own building layers, hidden while a swap is active. */
+/** K-OSM's own building layers, hidden while the zone-masked copy is active. */
 export const OSM_BUILDING_LAYERS = ["building", "building-3d"];
 
 /**
