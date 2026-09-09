@@ -17,6 +17,7 @@ import {
 } from "./config.js";
 import {
   postComparisonBuilding,
+  postComparisonScenario,
   startComparisonBridge,
 } from "./comparison.js";
 import { addComparisonCurtain, LEFT_CLIP } from "./curtain.js";
@@ -76,11 +77,15 @@ const siteDataReady = fetchJson(
 const zoneDataReady = fetchJson(
   new URL("../data/zones.geojson", import.meta.url),
 );
-const scenarioDataReady = SNAPSHOT === "before"
-  ? Promise.resolve(null)
-  : fetchJson(new URL("../data/zone_config.json", import.meta.url), {
-      cache: "no-store",
-    });
+const scenarioDataReady = {
+  current: fetchJson(new URL("../data/zone_config.json", import.meta.url), {
+    cache: "no-store",
+  }),
+  previous: fetchJson(
+    new URL("../data/zone_config.previous.json", import.meta.url),
+    { cache: "no-store" },
+  ),
+};
 
 const map = await mapReady;
 const zones = new Zones(map);
@@ -129,6 +134,8 @@ $("sim-toggle").checked = simVisible;
 /** The scenario file's own metadata, for the panel header. */
 let simMeta = { scenario: null, status: null };
 let scenarioConfig = null;
+let scenarioModel = "current";
+let scenarioRequest = 0;
 
 /** Currently inspected building, or null for the per-zone summary. */
 let selectedBuilding = null;
@@ -748,50 +755,77 @@ try {
  * but it is reported, since a silently absent simulation looks exactly
  * like one with nothing in it.
  */
+function applyScenarioConfig(cfg) {
+  scenarioConfig = cfg;
+  if (!Array.isArray(cfg?.zones)) throw new Error("zones[] missing");
+
+  simZones.clear();
+  simMeta = { scenario: null, status: null };
+  selectedBuilding = null;
+  selectedId = null;
+  selectedKosmId = null;
+
+  const wanted = new Set(cfg.applied ?? cfg.zones.map((z) => z.zone_fid));
+  for (const config of cfg.zones) {
+    if (!wanted.has(config.zone_fid)) continue;
+    const zone = zones.data?.features.find((f) => f.id === config.zone_fid);
+    if (!zone) {
+      console.warn(`sim: no zone with fid ${config.zone_fid}`);
+      continue;
+    }
+    const { features, report } = generateMassing(zone, config);
+    if (report.error) {
+      console.warn(`sim: zone ${config.zone_fid}: ${report.error}`);
+      continue;
+    }
+    // The engine's boundary rule holds here too: a mass that escaped its
+    // zone is reported, not drawn.
+    const check = verifyInsideZone(features, zone);
+    if (!check.ok) {
+      console.warn(
+        `sim: zone ${config.zone_fid} left its boundary (${check.outsideCount})`,
+      );
+      continue;
+    }
+    for (const f of features) {
+      // Track B's storey height, not the engine's flat 4.0 m default.
+      f.properties.height_m = heightOf(f.properties);
+      // Without this the LOD filter reads `area_m2` as missing and drops
+      // every generated mass the moment the camera pulls back.
+      f.properties.area_m2 ??= Math.round(footprintArea(f));
+      f.properties.sel_id = f.id;
+    }
+    simZones.set(config.zone_fid, { features, report, config });
+    simMeta = {
+      scenario: config.scenario_basis ?? simMeta.scenario,
+      status: config.agreement_status ?? simMeta.status,
+    };
+  }
+  refreshSite();
+  refreshSimZoneMark();
+  syncSelectionHighlight();
+  renderSimPanel();
+}
+
+async function setScenarioModel(model) {
+  if (!["previous", "current"].includes(model)) return;
+  const request = ++scenarioRequest;
+  if (model === scenarioModel) return;
+  try {
+    const cfg = await scenarioDataReady[model];
+    if (request !== scenarioRequest) return;
+    scenarioModel = model;
+    applyScenarioConfig(cfg);
+    postComparisonScenario(SNAPSHOT, scenarioPayload());
+  } catch (err) {
+    console.warn(`simulation unavailable: ${err.message}`);
+    status(`${$("status").textContent} · 시뮬레이션 없음`);
+  }
+}
+
 if (SNAPSHOT !== "before") {
   try {
-    const cfg = await scenarioDataReady;
-    scenarioConfig = cfg;
-    if (!Array.isArray(cfg?.zones)) throw new Error("zones[] missing");
-
-    const wanted = new Set(cfg.applied ?? cfg.zones.map((z) => z.zone_fid));
-    for (const config of cfg.zones) {
-      if (!wanted.has(config.zone_fid)) continue;
-      const zone = zones.data?.features.find((f) => f.id === config.zone_fid);
-      if (!zone) {
-        console.warn(`sim: no zone with fid ${config.zone_fid}`);
-        continue;
-      }
-      const { features, report } = generateMassing(zone, config);
-      if (report.error) {
-        console.warn(`sim: zone ${config.zone_fid}: ${report.error}`);
-        continue;
-      }
-      // The engine's boundary rule holds here too: a mass that escaped its
-      // zone is reported, not drawn.
-      const check = verifyInsideZone(features, zone);
-      if (!check.ok) {
-        console.warn(
-          `sim: zone ${config.zone_fid} left its boundary (${check.outsideCount})`,
-        );
-        continue;
-      }
-      for (const f of features) {
-        // Track B's storey height, not the engine's flat 4.0 m default.
-        f.properties.height_m = heightOf(f.properties);
-        // Without this the LOD filter reads `area_m2` as missing and drops
-        // every generated mass the moment the camera pulls back.
-        f.properties.area_m2 ??= Math.round(footprintArea(f));
-        f.properties.sel_id = f.id;
-      }
-      simZones.set(config.zone_fid, { features, report, config });
-      simMeta = {
-        scenario: config.scenario_basis ?? simMeta.scenario,
-        status: config.agreement_status ?? simMeta.status,
-      };
-    }
-    refreshSite();
-    refreshSimZoneMark();
+    applyScenarioConfig(await scenarioDataReady.current);
     status(`${$("status").textContent} · 시뮬레이션 ${simZones.size}개 구역`);
   } catch (err) {
     console.warn(`simulation unavailable: ${err.message}`);
@@ -1360,6 +1394,7 @@ function scenarioPayload() {
   if (!scenarioConfig) return null;
   return {
     ...scenarioConfig,
+    model: scenarioModel,
     zones: scenarioConfig.zones.map((zone) => {
       const sim = simZones.get(zone.zone_fid);
       return {
@@ -1378,6 +1413,7 @@ function scenarioPayload() {
 startComparisonBridge(map, SNAPSHOT, {
   getStats: stats,
   scenario: SNAPSHOT !== "before" ? scenarioPayload() : null,
+  setScenarioModel,
   setScenarioVisible: (visible) => viewer.setSimVisible(visible),
   selectBuilding: (building) => viewer.selectBuilding(building),
   setComparisonPosition,

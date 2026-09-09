@@ -15,6 +15,15 @@ export function postComparisonBuilding(snapshot, building) {
   );
 }
 
+/** Publish a newly selected scenario model without reloading the map. */
+export function postComparisonScenario(snapshot, scenario) {
+  if (window.parent === window) return;
+  window.parent.postMessage(
+    { type: "mimlab:gis-scenario", snapshot, scenario },
+    parentOrigin() || "*",
+  );
+}
+
 /** Keep both snapshot cameras aligned without exposing viewer internals. */
 export function startComparisonBridge(map, snapshot, options = {}) {
   if (window.parent === window) return;
@@ -130,6 +139,10 @@ export function startComparisonBridge(map, snapshot, options = {}) {
   window.addEventListener("message", (event) => {
     if (event.source !== window.parent) return;
     if (targetOrigin && event.origin !== targetOrigin) return;
+    if (event.data?.type === "mimlab:gis-set-model") {
+      options.setScenarioModel?.(event.data.model);
+      return;
+    }
     if (event.data?.type === "mimlab:gis-set-control") {
       const incoming = event.data.control;
       if (incoming?.id === "scenario") {
