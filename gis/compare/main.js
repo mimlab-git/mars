@@ -17,6 +17,7 @@ import {
 } from "./config.js";
 import {
   postComparisonBuilding,
+  postComparisonScenario,
   startComparisonBridge,
 } from "./comparison.js";
 import { addComparisonCurtain, LEFT_CLIP } from "./curtain.js";
@@ -25,6 +26,7 @@ import { estimateKosmBuildingScale } from "./kosm-style.js";
 import { intersectsArea } from "./swap.js";
 import { Zones, ZONES_SOURCE } from "./zones.js";
 import { generateMassing, verifyInsideZone } from "./zoneupdate.js";
+import { createGeoJSONUpdater } from "./geojson-updates.js";
 
 const $ = (id) => document.getElementById(id);
 const pathParts = location.pathname.split("/");
@@ -76,11 +78,11 @@ const siteDataReady = fetchJson(
 const zoneDataReady = fetchJson(
   new URL("../data/zones.geojson", import.meta.url),
 );
-const scenarioDataReady = SNAPSHOT === "before"
-  ? Promise.resolve(null)
-  : fetchJson(new URL("../data/zone_config.json", import.meta.url), {
-      cache: "no-store",
-    });
+const preparedModels = fetchJson(new URL("./scenario-models.json", import.meta.url), { cache: "no-store" });
+const scenarioDataReady = {
+  current: preparedModels.then((models) => models.current),
+  previous: preparedModels.then((models) => models.previous),
+};
 
 const map = await mapReady;
 const zones = new Zones(map);
@@ -129,6 +131,8 @@ $("sim-toggle").checked = simVisible;
 /** The scenario file's own metadata, for the panel header. */
 let simMeta = { scenario: null, status: null };
 let scenarioConfig = null;
+let scenarioModel = "current";
+let scenarioRequest = 0;
 
 /** Currently inspected building, or null for the per-zone summary. */
 let selectedBuilding = null;
@@ -545,10 +549,9 @@ function rendered() {
 
 /** Push the current composition to the map. */
 function refreshSite() {
-  map.getSource(SITE_SOURCE)?.setData(
-    IS_COMPARISON ? data : rendered(),
-  );
-  map.getSource(AFTER_SITE_SOURCE)?.setData(scenarioRendered());
+  // The comparison's left source is immutable after startup.
+  if (!IS_COMPARISON) updateSiteSource?.(rendered());
+  updateAfterSource?.(scenarioRendered());
 }
 
 /** Signed shoelace area of a ring in m2; mirrors buildings.js ringArea. */
@@ -602,6 +605,8 @@ function zoomFilter() {
 status("건물 불러오는 중...");
 let data = null;
 let useLegend = [];
+let updateSiteSource;
+let updateAfterSource;
 try {
   data = await siteDataReady;
   for (const f of data.features) {
@@ -614,6 +619,7 @@ try {
     type: "geojson",
     data: IS_COMPARISON ? data : rendered(),
   });
+  updateSiteSource = createGeoJSONUpdater(map.getSource(SITE_SOURCE), data);
   map.addLayer(
     {
       id: SITE_LAYER,
@@ -748,50 +754,77 @@ try {
  * but it is reported, since a silently absent simulation looks exactly
  * like one with nothing in it.
  */
+function applyScenarioConfig(cfg) {
+  scenarioConfig = cfg;
+  if (!Array.isArray(cfg?.zones)) throw new Error("zones[] missing");
+
+  simZones.clear();
+  simMeta = { scenario: null, status: null };
+  selectedBuilding = null;
+  selectedId = null;
+  selectedKosmId = null;
+
+  const wanted = new Set(cfg.applied ?? cfg.zones.map((z) => z.zone_fid));
+  for (const config of cfg.zones) {
+    if (!wanted.has(config.zone_fid)) continue;
+    const zone = zones.data?.features.find((f) => f.id === config.zone_fid);
+    if (!zone) {
+      console.warn(`sim: no zone with fid ${config.zone_fid}`);
+      continue;
+    }
+    const { features, report } = config.massing ?? generateMassing(zone, config);
+    if (report.error) {
+      console.warn(`sim: zone ${config.zone_fid}: ${report.error}`);
+      continue;
+    }
+    // The engine's boundary rule holds here too: a mass that escaped its
+    // zone is reported, not drawn.
+    const check = verifyInsideZone(features, zone);
+    if (!check.ok) {
+      console.warn(
+        `sim: zone ${config.zone_fid} left its boundary (${check.outsideCount})`,
+      );
+      continue;
+    }
+    for (const f of features) {
+      // Track B's storey height, not the engine's flat 4.0 m default.
+      f.properties.height_m = heightOf(f.properties);
+      // Without this the LOD filter reads `area_m2` as missing and drops
+      // every generated mass the moment the camera pulls back.
+      f.properties.area_m2 ??= Math.round(footprintArea(f));
+      f.properties.sel_id = f.id;
+    }
+    simZones.set(config.zone_fid, { features, report, config });
+    simMeta = {
+      scenario: config.scenario_basis ?? simMeta.scenario,
+      status: config.agreement_status ?? simMeta.status,
+    };
+  }
+  refreshSite();
+  refreshSimZoneMark();
+  syncSelectionHighlight();
+  renderSimPanel();
+}
+
+async function setScenarioModel(model) {
+  if (!["previous", "current"].includes(model)) return;
+  const request = ++scenarioRequest;
+  if (model === scenarioModel) return;
+  try {
+    const cfg = await scenarioDataReady[model];
+    if (request !== scenarioRequest) return;
+    scenarioModel = model;
+    applyScenarioConfig(cfg);
+    postComparisonScenario(SNAPSHOT, scenarioPayload());
+  } catch (err) {
+    console.warn(`simulation unavailable: ${err.message}`);
+    status(`${$("status").textContent} · 시뮬레이션 없음`);
+  }
+}
+
 if (SNAPSHOT !== "before") {
   try {
-    const cfg = await scenarioDataReady;
-    scenarioConfig = cfg;
-    if (!Array.isArray(cfg?.zones)) throw new Error("zones[] missing");
-
-    const wanted = new Set(cfg.applied ?? cfg.zones.map((z) => z.zone_fid));
-    for (const config of cfg.zones) {
-      if (!wanted.has(config.zone_fid)) continue;
-      const zone = zones.data?.features.find((f) => f.id === config.zone_fid);
-      if (!zone) {
-        console.warn(`sim: no zone with fid ${config.zone_fid}`);
-        continue;
-      }
-      const { features, report } = generateMassing(zone, config);
-      if (report.error) {
-        console.warn(`sim: zone ${config.zone_fid}: ${report.error}`);
-        continue;
-      }
-      // The engine's boundary rule holds here too: a mass that escaped its
-      // zone is reported, not drawn.
-      const check = verifyInsideZone(features, zone);
-      if (!check.ok) {
-        console.warn(
-          `sim: zone ${config.zone_fid} left its boundary (${check.outsideCount})`,
-        );
-        continue;
-      }
-      for (const f of features) {
-        // Track B's storey height, not the engine's flat 4.0 m default.
-        f.properties.height_m = heightOf(f.properties);
-        // Without this the LOD filter reads `area_m2` as missing and drops
-        // every generated mass the moment the camera pulls back.
-        f.properties.area_m2 ??= Math.round(footprintArea(f));
-        f.properties.sel_id = f.id;
-      }
-      simZones.set(config.zone_fid, { features, report, config });
-      simMeta = {
-        scenario: config.scenario_basis ?? simMeta.scenario,
-        status: config.agreement_status ?? simMeta.status,
-      };
-    }
-    refreshSite();
-    refreshSimZoneMark();
+    applyScenarioConfig(await scenarioDataReady.current);
     status(`${$("status").textContent} · 시뮬레이션 ${simZones.size}개 구역`);
   } catch (err) {
     console.warn(`simulation unavailable: ${err.message}`);
@@ -802,10 +835,12 @@ if (SNAPSHOT !== "before") {
 let comparisonPosition = 50;
 let setComparisonPosition = null;
 if (IS_COMPARISON && data) {
+  const initialAfter = scenarioRendered();
   map.addSource(AFTER_SITE_SOURCE, {
     type: "geojson",
-    data: scenarioRendered(),
+    data: initialAfter,
   });
+  updateAfterSource = createGeoJSONUpdater(map.getSource(AFTER_SITE_SOURCE), initialAfter);
   map.addLayer(
     {
       id: AFTER_SITE_LAYER,
@@ -951,7 +986,10 @@ const zoneLabel = (fid) => {
 const row = (k, v) =>
   `<div class="zone-row"><span>${esc(k)}</span><span class="v">${esc(v)}</span></div>`;
 const percent = (value) =>
-  Number(value).toLocaleString("ko-KR", { maximumFractionDigits: 1 });
+  Number(value).toLocaleString("ko-KR", {
+    maximumFractionDigits: 1,
+    useGrouping: false,
+  });
 
 const INFERRED_KR = {
   far: "용적률",
@@ -1003,7 +1041,6 @@ function renderSimSummary() {
   const cards = [];
   for (const [fid, sim] of simZones) {
     const r = sim.report;
-    const demolished = demolitionCount(fid);
     const masses = sim.features
       .map((f) => {
         const p = f.properties;
@@ -1017,7 +1054,9 @@ function renderSimSummary() {
     cards.push(
       `<div class="zone-card">` +
         `<div class="zone-name">${esc(zoneLabel(fid))} <span style="color:#999;font-weight:400">fid ${fid}</span></div>` +
-        row("기존 → 신규", `${demolished}동 철거 → ${r.placed}동`) +
+        (scenarioModel === "previous"
+          ? row("기존 → 신규", `${demolitionCount(fid)}동 철거 → ${r.placed}동`)
+          : row("반영후", `${r.placed}동 유지`)) +
         row("용적률", `${percent(r.achievedFar)}% / 목표 ${percent(r.targetFar)}%`) +
         row("연면적", `${r.achievedGfaM2.toLocaleString()}㎡`) +
         row("대지 / 가용", `${r.siteAreaM2.toLocaleString()} / ${r.buildableAreaM2.toLocaleString()}㎡`) +
@@ -1360,6 +1399,7 @@ function scenarioPayload() {
   if (!scenarioConfig) return null;
   return {
     ...scenarioConfig,
+    model: scenarioModel,
     zones: scenarioConfig.zones.map((zone) => {
       const sim = simZones.get(zone.zone_fid);
       return {
@@ -1378,6 +1418,7 @@ function scenarioPayload() {
 startComparisonBridge(map, SNAPSHOT, {
   getStats: stats,
   scenario: SNAPSHOT !== "before" ? scenarioPayload() : null,
+  setScenarioModel,
   setScenarioVisible: (visible) => viewer.setSimVisible(visible),
   selectBuilding: (building) => viewer.selectBuilding(building),
   setComparisonPosition,
