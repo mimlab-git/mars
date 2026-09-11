@@ -26,6 +26,7 @@ import { estimateKosmBuildingScale } from "./kosm-style.js";
 import { intersectsArea } from "./swap.js";
 import { Zones, ZONES_SOURCE } from "./zones.js";
 import { generateMassing, verifyInsideZone } from "./zoneupdate.js";
+import { createGeoJSONUpdater } from "./geojson-updates.js";
 
 const $ = (id) => document.getElementById(id);
 const pathParts = location.pathname.split("/");
@@ -77,14 +78,10 @@ const siteDataReady = fetchJson(
 const zoneDataReady = fetchJson(
   new URL("../data/zones.geojson", import.meta.url),
 );
+const preparedModels = fetchJson(new URL("./scenario-models.json", import.meta.url), { cache: "no-store" });
 const scenarioDataReady = {
-  current: fetchJson(new URL("../data/zone_config.json", import.meta.url), {
-    cache: "no-store",
-  }),
-  previous: fetchJson(
-    new URL("../data/zone_config.previous.json", import.meta.url),
-    { cache: "no-store" },
-  ),
+  current: preparedModels.then((models) => models.current),
+  previous: preparedModels.then((models) => models.previous),
 };
 
 const map = await mapReady;
@@ -552,10 +549,9 @@ function rendered() {
 
 /** Push the current composition to the map. */
 function refreshSite() {
-  map.getSource(SITE_SOURCE)?.setData(
-    IS_COMPARISON ? data : rendered(),
-  );
-  map.getSource(AFTER_SITE_SOURCE)?.setData(scenarioRendered());
+  // The comparison's left source is immutable after startup.
+  if (!IS_COMPARISON) updateSiteSource?.(rendered());
+  updateAfterSource?.(scenarioRendered());
 }
 
 /** Signed shoelace area of a ring in m2; mirrors buildings.js ringArea. */
@@ -609,6 +605,8 @@ function zoomFilter() {
 status("건물 불러오는 중...");
 let data = null;
 let useLegend = [];
+let updateSiteSource;
+let updateAfterSource;
 try {
   data = await siteDataReady;
   for (const f of data.features) {
@@ -621,6 +619,7 @@ try {
     type: "geojson",
     data: IS_COMPARISON ? data : rendered(),
   });
+  updateSiteSource = createGeoJSONUpdater(map.getSource(SITE_SOURCE), data);
   map.addLayer(
     {
       id: SITE_LAYER,
@@ -773,7 +772,7 @@ function applyScenarioConfig(cfg) {
       console.warn(`sim: no zone with fid ${config.zone_fid}`);
       continue;
     }
-    const { features, report } = generateMassing(zone, config);
+    const { features, report } = config.massing ?? generateMassing(zone, config);
     if (report.error) {
       console.warn(`sim: zone ${config.zone_fid}: ${report.error}`);
       continue;
@@ -836,10 +835,12 @@ if (SNAPSHOT !== "before") {
 let comparisonPosition = 50;
 let setComparisonPosition = null;
 if (IS_COMPARISON && data) {
+  const initialAfter = scenarioRendered();
   map.addSource(AFTER_SITE_SOURCE, {
     type: "geojson",
-    data: scenarioRendered(),
+    data: initialAfter,
   });
+  updateAfterSource = createGeoJSONUpdater(map.getSource(AFTER_SITE_SOURCE), initialAfter);
   map.addLayer(
     {
       id: AFTER_SITE_LAYER,
