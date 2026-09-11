@@ -1053,7 +1053,9 @@ function renderSimSummary() {
     cards.push(
       `<div class="zone-card">` +
         `<div class="zone-name">${esc(zoneLabel(fid))} <span style="color:#999;font-weight:400">fid ${fid}</span></div>` +
-        row("반영후", `${r.placed}동 유지`) +
+        (scenarioModel === "previous"
+          ? row("기존 → 신규", `${demolitionCount(fid)}동 철거 → ${r.placed}동`)
+          : row("반영후", `${r.placed}동 유지`)) +
         row("용적률", `${percent(r.achievedFar)}% / 목표 ${percent(r.targetFar)}%`) +
         row("연면적", `${r.achievedGfaM2.toLocaleString()}㎡`) +
         row("대지 / 가용", `${r.siteAreaM2.toLocaleString()} / ${r.buildableAreaM2.toLocaleString()}㎡`) +
