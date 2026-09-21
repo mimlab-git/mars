@@ -23,7 +23,7 @@
 // 촉진구역(복합개발용지) - 28 of the 48. The 존치관리 zones stay as they
 // are (that is what 존치관리 means), and the 공원용지 zones are parks.
 
-import { pointInPolygon } from "./swap.js";
+import { pointInPolygon } from "./geometry.js";
 
 /** Zone types whose interior may be rebuilt. */
 const UPDATABLE = [
@@ -44,7 +44,7 @@ const SETBACK_M = 3;
 /** Gap between masses when a zone holds more than one. */
 const MASS_GAP_M = 6;
 
-export function isUpdatable(zoneType) {
+function isUpdatable(zoneType) {
   return UPDATABLE.includes(zoneType);
 }
 
@@ -76,18 +76,6 @@ function ringArea(ring) {
     sum += ring[i][0] * ring[i + 1][1] - ring[i + 1][0] * ring[i][1];
   }
   return Math.abs(sum) / 2;
-}
-
-/** Zone area in square metres, from geometry - never from `zone_area`. */
-export function zoneAreaM2(geometry) {
-  const rings =
-    geometry.type === "MultiPolygon"
-      ? geometry.coordinates.map((p) => p[0])
-      : [geometry.coordinates[0]];
-  const frame = metresFrame(rings[0]);
-  let total = 0;
-  for (const ring of rings) total += ringArea(ring.map(frame.toM));
-  return total;
 }
 
 /**
@@ -173,7 +161,7 @@ function bounds(ring) {
   return { minX, minY, maxX, maxY };
 }
 
-/** Is a point inside a ring? Ray cast, same rule as swap.js. */
+/** Is a point inside a ring? Ray cast, same rule as geometry.js. */
 function inRing(x, y, ring) {
   let inside = false;
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {

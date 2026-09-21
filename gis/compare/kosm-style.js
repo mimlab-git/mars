@@ -14,7 +14,7 @@ const TOTAL_AREA = ["to-number", ["get", "building:area:total"], 0];
 const GROUND_AREA = ["to-number", ["get", "building:area:ground"], 0];
 const AREA_LEVELS = ["/", TOTAL_AREA, ["max", GROUND_AREA, 1]];
 
-export const KOSM_LEVEL_HEIGHT_STOPS = [
+const KOSM_LEVEL_HEIGHT_STOPS = [
   [1, 4.9], [2, 7.8], [3, 10.5], [5, 15], [10, 29.9],
   [15, 41.3], [20, 55.2], [30, 86.8], [40, 118.8], [60, 182.8],
 ];
@@ -22,7 +22,7 @@ export const KOSM_LEVEL_HEIGHT_STOPS = [
 // K-OSM's Korea-calibrated level curve. A building with no usable scale
 // attributes stays visible with a conservative one-storey context height;
 // its detail panel explicitly marks that height as a visual fallback.
-export const KOSM_BUILDING_HEIGHT = [
+const KOSM_BUILDING_HEIGHT = [
   "case",
   [">", SURVEYED_HEIGHT, 0],
   SURVEYED_HEIGHT,

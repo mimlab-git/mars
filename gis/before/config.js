@@ -1,48 +1,4 @@
 // Everything the viewer treats as a knob, in one place.
-//
-/**
- * The swap area: the ground our NGII data actually covers.
- *
- * The nine 1:5000 sheets tile a 3x3 waffle with no gaps and no overlap -
- * measured from the data, the seams meet within a metre (columns split at
- * x=197791 and x=200000 in EPSG:5186). Each sheet is 2,210 x 2,775 m, and
- * the whole block is 6,629 x 8,325 m = 55.19 km2.
- *
- * The grid is rectangular in WGS84, not in the storage CRS: transforming
- * the four corners of the data extent lands on 126.95/127.025 x
- * 37.525/37.60 to within 0.000048 degrees (~4 m). NGII cuts its sheets on
- * lon/lat, so 0.025 degrees per sheet is the real ruling, and the metre
- * figures above are what that works out to at this latitude.
- *
- * Using the clean grid values rather than the measured extent is
- * deliberate. The measured maximum is a single building overhanging its
- * sheet by a few metres; taking it as the boundary would pin the area to
- * an accident of the data. Against the clean grid, 349 of 127,890
- * buildings cross the edge and 5 fall entirely outside - by at most 0.5 m.
- * The crossing ones are ours to draw (touching is enough, see swap.js);
- * the 5 stay with OSM.
- *
- * An administrative boundary was the original plan for this step. The
- * sheet grid is better: it needs no new table, and it cannot produce the
- * hole a district boundary would where the district leaves our coverage.
- */
-export const AREA = (() => {
-  const bbox = [126.95, 37.525, 127.025, 37.6];
-  const [w, s, e, n] = bbox;
-  const geometry = {
-    type: "Polygon",
-    coordinates: [[[w, s], [e, s], [e, n], [w, n], [w, s]]],
-  };
-  return {
-    bbox,
-    geometry,
-    feature: { type: "Feature", properties: {}, geometry },
-    label: "NGII 1:5000 도엽 9장 (55.19 km²)",
-  };
-})();
-
-/** Metres per storey. NGII gives floor counts, not heights. */
-export const DEFAULT_FLOOR_HEIGHT = 4.0;
 
 /**
  * Static K-OSM coverage beyond the project bounds.
@@ -148,48 +104,11 @@ export const COLORS = {
 };
 
 /**
- * Cinematic styling: atmosphere, sun, and a toned-down surround.
- *
- * A toggle, never the default. The analysis view's flat lighting and full
- * basemap saturation are what the verification workflow measures against,
- * and the counts in a screenshot have to stay readable. This exists to
- * produce the BASE IMAGE for the render pipeline's later AI pass, where
- * what matters is that the massing reads clearly and the surround does
- * not compete with it.
- *
- * The sun sits south-west at a low winter angle: it puts the lit face of
- * a 종묘-facing mass toward the camera in the standard comparison views,
- * and long shadows are what make a massing model read as built rather
- * than as a diagram.
- */
-export const CINEMATIC = {
-  sky: {
-    "sky-color": "#8fb8e0",
-    "horizon-color": "#e8d5c0",
-    "fog-color": "#dfe6ee",
-    "sky-horizon-blend": 0.6,
-    "horizon-fog-blend": 0.5,
-    "fog-ground-blend": 0.1,
-    "atmosphere-blend": 0.7,
-  },
-  light: {
-    anchor: "map",
-    // MapLibre's azimuth is degrees clockwise from north (map anchor).
-    position: [1.5, 225, 55],
-    color: "#fff4e0",
-    intensity: 0.45,
-  },
-  /** OSM surround, desaturated so our massing carries the frame. */
-  surroundColor: "#c3c7cc",
-  surroundOpacity: 0.85,
-};
-
-/**
  * Level of detail for OUR buildings only.
  *
  * This applies to the NGII layer and nothing else. OSM's buildings arrive
  * pre-tiled with their own LOD rules baked in (`building-3d` starts at z14),
- * so `swap.js` inherits the style's zoom range rather than imposing ours.
+ * so the K-OSM masking in main.js inherits the style's zoom range rather than imposing ours.
  * Thinning one dataset by another's rules is what made buildings appear
  * below the zoom the basemap intended.
  *

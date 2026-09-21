@@ -23,7 +23,7 @@ import {
 import { addComparisonCurtain, LEFT_CLIP } from "./curtain.js";
 import { createMap, scheduleTerrain, waitIdle } from "./map.js";
 import { estimateKosmBuildingScale } from "./kosm-style.js";
-import { intersectsArea } from "./swap.js";
+import { intersectsArea } from "./geometry.js";
 import { Zones, ZONES_SOURCE } from "./zones.js";
 import { generateMassing, verifyInsideZone } from "./zoneupdate.js";
 import { createGeoJSONUpdater } from "./geojson-updates.js";
@@ -40,19 +40,19 @@ const status = (text) => {
   $("status").textContent = text;
 };
 
-export const SITE_SOURCE = "site-buildings";
-export const SITE_LAYER = "site-3d";
-export const AFTER_SITE_SOURCE = "site-buildings-after";
-export const AFTER_SITE_LAYER = "site-3d-after";
-export const SELECTED_LAYER = "site-selected";
-export const AFTER_SELECTED_LAYER = "site-selected-after";
-export const SIM_ZONE_FILL_LAYER = "sim-zones-fill";
-export const SIM_ZONE_GLOW_LAYERS = [
+const SITE_SOURCE = "site-buildings";
+const SITE_LAYER = "site-3d";
+const AFTER_SITE_SOURCE = "site-buildings-after";
+const AFTER_SITE_LAYER = "site-3d-after";
+const SELECTED_LAYER = "site-selected";
+const AFTER_SELECTED_LAYER = "site-selected-after";
+const SIM_ZONE_FILL_LAYER = "sim-zones-fill";
+const SIM_ZONE_GLOW_LAYERS = [
   "sim-zones-glow-3",
   "sim-zones-glow-2",
   "sim-zones-glow-1",
 ];
-export const SIM_ZONE_LINE_LAYER = "sim-zones-outline";
+const SIM_ZONE_LINE_LAYER = "sim-zones-outline";
 const SIM_ZONE_LAYERS = [
   SIM_ZONE_FILL_LAYER,
   ...SIM_ZONE_GLOW_LAYERS,
@@ -103,8 +103,8 @@ function moveBasemapSymbolsBelow(anchorId) {
   for (const layer of symbols) map.moveLayer(layer.id, anchorId);
 }
 
-export const OSM_OUTSIDE_LAYER = "osm-outside-zones";
-export const OSM_STRADDLE_LAYER = "osm-straddle-zones";
+const OSM_OUTSIDE_LAYER = "osm-outside-zones";
+const OSM_STRADDLE_LAYER = "osm-straddle-zones";
 const OSM_STRADDLE_SOURCE = "osm-straddle-zones-src";
 const KOSM_SELECTED_LAYER = "kosm-selected-building";
 
@@ -169,8 +169,8 @@ function refreshSimZoneMark() {
 
 /**
  * The swap, zone-scoped: OSM buildings everywhere EXCEPT inside a zone,
- * ours inside. Same shape as Track A's sheet-grid swap (swap.js), with
- * the zones' union as the boundary instead of the 9-sheet AREA.
+ * ours inside. Same shape as the upstream full-area sheet-grid swap, with
+ * the zones' union as the boundary instead of the full 9-sheet NGII area.
  *
  * `within` excludes only features FULLY inside the union, so an OSM
  * building straddling a zone edge is still drawn and can overlap ours -
@@ -476,7 +476,7 @@ function addOsmOutsideZones(zoneUnion) {
   };
 }
 
-/** Is every vertex of this piece inside the zones? Mirrors swap.js. */
+/** Is every vertex of this piece inside the zones? Mirrors geometry.js. */
 function pieceFullyInside(geometry, union) {
   const polys =
     geometry.type === "MultiPolygon"
@@ -490,7 +490,7 @@ function pieceFullyInside(geometry, union) {
   return true;
 }
 
-/** Ray-cast against the zone union; mirrors swap.js pointInRing. */
+/** Ray-cast against the zone union; mirrors geometry.js pointInRing. */
 function pointInZones(lon, lat, union) {
   for (const poly of union.coordinates) {
     const ring = poly[0];

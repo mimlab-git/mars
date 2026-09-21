@@ -17,13 +17,13 @@
 // detail number was left blank. Keying on the concept would merge them.
 // Only 7/9 (을지트윈타워) is genuinely one site split across two polygons.
 
-import { pointInPolygon } from "./swap.js";
+import { pointInPolygon } from "./geometry.js";
 
 export const ZONES_SOURCE = "zones-src";
 const SOURCE = ZONES_SOURCE;
-export const ZONE_FILL_LAYER = "zones-fill";
-export const ZONE_LINE_LAYER = "zones-outline";
-export const ZONE_HIGHLIGHT_LAYER = "zone-buildings-highlight";
+const ZONE_FILL_LAYER = "zones-fill";
+const ZONE_LINE_LAYER = "zones-outline";
+const ZONE_HIGHLIGHT_LAYER = "zone-buildings-highlight";
 
 /** Colour per planning category. Grey is the fallback. */
 const TYPE_COLORS = {
@@ -261,10 +261,10 @@ export class Zones {
    * intersection 172 land in two or three, which a per-zone edit cannot
    * resolve - the same building would be modified twice by two configs.
    *
-   * The centroid rule is safe here in a way it is NOT in swap.js. These
+   * The centroid rule is safe here in a way it is NOT for tile-clipped basemap pieces. These
    * features arrive whole from our own API, so a centroid is the real
    * footprint's centroid. OSM's arrive as tile-clipped pieces, where a
-   * piece's middle is not the feature's middle - which is why swap.js
+   * piece's middle is not the feature's middle - which is why the K-OSM mask
    * judges overlap instead.
    *
    * Returns counts, so the caller can assert rather than assume.
