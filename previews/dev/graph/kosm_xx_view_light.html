@@ -131,15 +131,8 @@ function dispName(n){
 }
 
 const cv=document.getElementById("cv"),ctx=cv.getContext("2d");
-// 장면은 오프스크린 비트맵(scene)에 그리고, 화면(cv)에는 blit만 한다.
-// 팬/줌/호버 중에는 캐시된 비트맵을 변환해 붙이므로 장면 재렌더 비용이 입력 지연으로 이어지지 않는다.
-const scene=document.createElement("canvas"),sctx=scene.getContext("2d");
 let W,H,DPR=window.devicePixelRatio||1;
-function resize(){const r=cv.getBoundingClientRect();W=r.width;H=r.height;cv.width=scene.width=W*DPR;cv.height=scene.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);sctx.setTransform(DPR,0,0,DPR,0,0);sceneTr=null;requestRender();}
-// Path2D 묶음 — 서브패스가 너무 많은 단일 경로는 GPU 래스터에서 밀려나므로 n개 단위로 쪼갠다
-class Batch{constructor(n=400){this.n=n;this.paths=[];this.c=n;}
-  next(){if(this.c>=this.n){this.paths.push(new Path2D());this.c=0;}this.c++;return this.paths[this.paths.length-1];}
-  fill(c){for(const p of this.paths)c.fill(p);}stroke(c){for(const p of this.paths)c.stroke(p);}}
+function resize(){const r=cv.getBoundingClientRect();W=r.width;H=r.height;cv.width=W*DPR;cv.height=H*DPR;ctx.setTransform(DPR,0,0,DPR,0,0);requestRender();}
 window.addEventListener("resize",resize);
 
 const byId=new Map(DATA.nodes.map(n=>[n.id,n]));
@@ -173,49 +166,19 @@ DATA.nodes.forEach(n=>{
   if(n.lat){n.gx=lonX(n.lon);n.gy=latY(n.lat);}else{n.gx=0;n.gy=0;}
   n.x=n.lx!==undefined?n.lx:n.gx;n.y=n.ly!==undefined?n.ly:n.gy;
 });
-// 화면 밖 판정용 월드 좌표 bbox (폴리라인/폴리곤)
-function worldBox(pts){let x0=1/0,y0=1/0,x1=-1/0,y1=-1/0;for(const p of pts){const x=lonX(p[1]),y=latY(p[0]);if(x<x0)x0=x;if(x>x1)x1=x;if(y<y0)y0=y;if(y>y1)y1=y;}return[x0,y0,x1,y1];}
-for(const arr of [DATA.road_lines,DATA.bld_fp,DATA.zone_poly])for(const it of arr)it.wb=worldBox(it.pts);
-function boxOnScreen(wb,m){const a=tf(wb[0],wb[1]),b=tf(wb[2],wb[3]);return!(b[0]<-m||a[0]>W+m||b[1]<-m||a[1]>H+m);}
-function boxHas(wb,x,y,m){return x>=wb[0]-m&&x<=wb[2]+m&&y>=wb[1]-m&&y<=wb[3]+m;}
 
-// 렌더 스케줄러
-//  requestRender(): 내용이 바뀜(선택·토글·트윈·드래그) → 장면 재렌더 필요
-//  requestView():   시점만 바뀜(팬·줌·호버)         → 캐시 비트맵 blit, 장면은 여유 있을 때
-// 상호작용 중에는 직전 렌더 시간의 3배 간격으로만 실제 재렌더하고, 입력이 멈추면 한 번 마무리한다.
-let rafId=0,sceneTr=null,sceneDirty=true,lastSceneMs=0,lastSceneAt=-1e9,lastInput=-1e9,idleTimer=0;
-function requestRender(){sceneDirty=true;schedule();}
-function requestView(){schedule();}
-function schedule(){if(!rafId)rafId=requestAnimationFrame(frame);}
-function noteInput(now){lastInput=now;clearTimeout(idleTimer);idleTimer=setTimeout(()=>{schedule();},140);}
+// 렌더 프레임 합치기 — 이벤트는 요청만 하고, 프레임당 한 번 그림
+let rafId=0;
+function requestRender(){if(!rafId)rafId=requestAnimationFrame(frame);}
 function frame(now){
   rafId=0;
   if(tween){
     const t=Math.min(1,(now-tween.t0)/tween.dur);
     mix=tween.from+(tween.to-tween.from)*(1-Math.pow(1-t,3));
     if(t>=1){mix=tween.to;tween=null;}
-    invalidatePick();sceneDirty=true;
   }
-  const viewStale=!sceneTr||sceneTr.k!==tr.k||sceneTr.x!==tr.x||sceneTr.y!==tr.y;
-  if(sceneDirty||viewStale){
-    const interacting=(now-lastInput)<140&&sceneTr;
-    if(!interacting||tween||(now-lastSceneAt)>Math.max(16,lastSceneMs*3)){
-      const t0=performance.now();render();lastSceneMs=performance.now()-t0;lastSceneAt=now;
-      sceneTr={k:tr.k,x:tr.x,y:tr.y};sceneDirty=false;
-    }
-  }
-  blit();
-  if(tween)schedule();
-}
-function blit(){
-  ctx.clearRect(0,0,W,H);
-  const sc=tr.k/sceneTr.k,dx=tr.x-sceneTr.x*sc,dy=tr.y-sceneTr.y*sc;
-  ctx.drawImage(scene,dx,dy,W*sc,H*sc);
-  // 호버 링은 점으로 그려지는 노드에만 — geo 모드의 도로/영역/건물 노드는 선·면으로만 표시된다
-  if(hover&&dotVisible(hover)&&!(sel&&sel.get(hover.id)===0)){
-    const p=pos(hover),c=tf(p[0],p[1]),r=RADIUS[hover.l]*Math.max(.7,Math.min(1.8,Math.sqrt(tr.k)));
-    ctx.strokeStyle="#272424";ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(c[0],c[1],r,0,7);ctx.stroke();
-  }
+  render();
+  if(tween)requestRender();
 }
 
 // 배치 전환 트윈 (mix 0=지리, 1=관계)
@@ -225,7 +188,7 @@ function setMode(m){
   mode=m;
   if(m==="geo")fitView();
   if(mix!==to)tween={from:mix,to,t0:performance.now(),dur:450};
-  invalidatePick();requestRender();
+  requestRender();
 }
 
 // 드래그 시 국소 물리 — 잡은 노드의 hop 이웃(최대 400개)만 시뮬레이션, 원위치로 약하게 복귀
@@ -245,7 +208,7 @@ function startLocalSim(root){
     .force("collide",d3.forceCollide(3))
     .force("ax",d3.forceX(n=>n.ax).strength(.08)).force("ay",d3.forceY(n=>n.ay).strength(.08))
     .alphaDecay(.03).velocityDecay(.5).alphaTarget(.3)
-    .on("tick",()=>{invalidatePick();requestRender();})
+    .on("tick",()=>{requestRender();})
     .on("end",()=>{localSim=null;});
 }
 function stopLocalSim(){if(localSim){localSim.stop();localSim=null;}}
@@ -276,7 +239,7 @@ function buildLegend(){
       // 클릭 피드백 펄스
       el.animate([{transform:"scale(.92)"},{transform:"scale(1)"}],{duration:140,easing:"ease-out"});
       buildLegend();
-      invalidatePick();requestRender();
+      requestRender();
     };
   });
 }
@@ -317,10 +280,8 @@ function tbColor(zt){zt=zt||"";if(zt.indexOf("촉진")>=0)return["180,83,9","#b4
   if(zt.indexOf("존치관리")>=0)return["29,92,150","#1d5c96"];return["111,105,105","#6f6969"];}
 function isPed(n){return n.l==="Road"&&n.p&&n.p.pedestrian==="1";}
 function vis(n){return nlabelOn[n.l];}
-function dotVisible(n){return vis(n)&&!(mode==="geo"&&(n.l==="Road"||n.l==="Water"||n.l==="Rail"||n.l==="Area"||n.l==="Building"));}
 
 function render(){
-  const ctx=sctx;
   ctx.clearRect(0,0,W,H);
   const lod=Math.min(1,Math.max(.12,(tr.k-.4)/1.4));
   // geo: 부지 영역 (학교·공원 등)
@@ -365,37 +326,33 @@ function render(){
       ctx.setLineDash(seld?[]:dash);ctx.stroke();ctx.setLineDash([]);ctx.globalAlpha=1;
     }
   }
-  // geo: 건물 footprint (면) — 스타일별 Path2D 하나로 묶어 fill 3번
+  // geo: 건물 footprint (면) — 점이 아니라 실제 건물 형태로 (일관성)
   if(mode==="geo"&&nlabelOn.Building&&DATA.bld_fp){
-    const normal=new Batch(),selP=new Batch();let rootP=null,hasSel=false;
+    const lodB=tr.k>.35; // 너무 줌아웃이면 면 생략(성능)
     for(const fp of DATA.bld_fp){
-      const seld=sel&&sel.has(fp.r),isRootB=sel&&sel.get(fp.r)===0;
-      if(sel&&!seld&&tr.k<1.2)continue; // 선택시 hop이웃 건물은 보임
-      if(!boxOnScreen(fp.wb,4))continue;
-      const path=(isRootB?(rootP=rootP||new Batch()):seld?(hasSel=true,selP):normal).next();
-      fp.pts.forEach((p,i)=>{const c=tf(lonX(p[1]),latY(p[0]));i?path.lineTo(c[0],c[1]):path.moveTo(c[0],c[1]);});
-      path.closePath();
+      const seld=sel&&sel.has(fp.r);
+      const isRootB=sel&&sel.get(fp.r)===0;
+      if(sel&&!sel.has(fp.r)&&tr.k<1.2)continue; // 선택시 hop이웃 건물은 보임
+      ctx.beginPath();fp.pts.forEach((p,i)=>{const c=tf(lonX(p[1]),latY(p[0]));i?ctx.lineTo(c[0],c[1]):ctx.moveTo(c[0],c[1]);});
+      ctx.closePath();
+      ctx.fillStyle=isRootB?"rgba(220,38,38,0.92)":seld?"rgba(169,118,47,0.62)":"rgba(169,118,47,0.34)";
+      ctx.globalAlpha=sel?(isRootB?1:seld?.5:.12):1;ctx.fill();
+      if(isRootB){ctx.strokeStyle="#dc2626";ctx.lineWidth=3;ctx.stroke();ctx.strokeStyle="#fbfaf9";ctx.lineWidth=1;ctx.stroke();}
+      else if(seld){ctx.strokeStyle="#272424";ctx.lineWidth=1.2;ctx.stroke();}
+      ctx.globalAlpha=1;
     }
-    ctx.globalAlpha=sel?.12:1;ctx.fillStyle="rgba(169,118,47,0.34)";normal.fill(ctx);
-    if(hasSel){ctx.globalAlpha=.5;ctx.fillStyle="rgba(169,118,47,0.62)";selP.fill(ctx);ctx.strokeStyle="#272424";ctx.lineWidth=1.2;selP.stroke(ctx);}
-    if(rootP){ctx.globalAlpha=1;ctx.fillStyle="rgba(220,38,38,0.92)";rootP.fill(ctx);ctx.strokeStyle="#dc2626";ctx.lineWidth=3;rootP.stroke(ctx);ctx.strokeStyle="#fbfaf9";ctx.lineWidth=1;rootP.stroke(ctx);}
-    ctx.globalAlpha=1;
   }
   // geo: 도로/하천/철도 선
   if(mode==="geo"){
-    // 도로 — (보행/차도 × 선택상태)별 Path2D로 묶어 stroke
-    if(nlabelOn.Road){
-      const rg=new Map();
-      for(const rl of DATA.road_lines){
-        if(rl.p?!roadKind.ped:!roadKind.veh)continue;
-        if(!boxOnScreen(rl.wb,4))continue;
-        const on=sel?sel.has(rl.r):false;
-        const key=(rl.p?1:0)+(sel?(on?2:4):0);
-        let g=rg.get(key);
-        if(!g){g={b:new Batch(),a:sel?(on?1:.05):.5,col:sel&&on?(rl.p?"#166534":"#3f3a38"):(rl.p?"#2f7d5c":"#9c9490"),lw:sel&&on?2.2:(rl.p?.8:1.4)};rg.set(key,g);}
-        const path=g.b.next();rl.pts.forEach((p,i)=>{const c=tf(lonX(p[1]),latY(p[0]));i?path.lineTo(c[0],c[1]):path.moveTo(c[0],c[1]);});
-      }
-      for(const g of rg.values()){ctx.globalAlpha=g.a;ctx.strokeStyle=g.col;ctx.lineWidth=g.lw;g.b.stroke(ctx);}
+    for(const rl of DATA.road_lines){
+      if(!nlabelOn.Road)break;
+      if(rl.p?!roadKind.ped:!roadKind.veh)continue;
+      const hop=sel?sel.get(rl.r):undefined;
+      const on=hop!==undefined;
+      ctx.globalAlpha=sel?(on?1:.05):.5;
+      if(sel&&on){ctx.strokeStyle=rl.p?"#166534":"#3f3a38";ctx.lineWidth=2.2;}
+      else{ctx.strokeStyle=rl.p?"#2f7d5c":"#9c9490";ctx.lineWidth=rl.p?.8:1.4;}
+      ctx.beginPath();rl.pts.forEach((p,i)=>{const c=tf(lonX(p[1]),latY(p[0]));i?ctx.lineTo(c[0],c[1]):ctx.moveTo(c[0],c[1]);});ctx.stroke();
     }
     ctx.globalAlpha=1;
     if(nlabelOn.Water)for(const wl of DATA.water_lines){
@@ -408,16 +365,14 @@ function render(){
     }
     ctx.globalAlpha=1;
   }
-  // 엣지 (geo 모드: 선택 시에만 표시, 안 그러면 떡칠) — (관계·알파·굵기)별 Path2D로 묶어 stroke
-  const M=20,eg=new Map(),dots=new Map();
-  for(const l of tween?[]:links){ // 트윈 중에는 노드만 움직이고 엣지는 도착 후 그린다
+  // 엣지 (geo 모드: 선택 시에만 표시, 안 그러면 떡칠) — 배치 트윈 중에는 생략
+  for(const l of tween?[]:links){
     if((mode==="geo"&&isAdminBnd(l))||!relOn[l.r]||!vis(l.source)||!vis(l.target))continue;
     if(mode==="geo"&&!sel&&l.r!=="ROAD_LINK")continue;
     if(mode==="geo"&&l.r==="ROAD_LINK"){
       if(!l.j||(sel&&!(sel.has(l.source.id)||sel.has(l.target.id))))continue;
-      const c=tf(lonX(l.j[1]),latY(l.j[0]));if(c[0]<-M||c[0]>W+M||c[1]<-M||c[1]>H+M)continue;
-      const r=sel?2.5:1.3;let d=dots.get(r);if(!d){d={b:new Batch(),a:sel?.9:.35};dots.set(r,d);}
-      const path=d.b.next();path.moveTo(c[0]+r,c[1]);path.arc(c[0],c[1],r,0,7);continue;
+      const c=tf(lonX(l.j[1]),latY(l.j[0]));ctx.globalAlpha=sel?.9:.35;ctx.fillStyle=RCOL.ROAD_LINK;
+      ctx.beginPath();ctx.arc(c[0],c[1],sel?2.5:1.3,0,7);ctx.fill();ctx.globalAlpha=1;continue;
     }
     let a=.4,lw=1;
     if(sel){const on=sel.has(l.source.id)&&sel.has(l.target.id);
@@ -433,37 +388,27 @@ function render(){
         if(att){const ca=tf(lonX(att[1]),latY(att[0]));
           if(l.source===bld){c1=tf(bld.gx,bld.gy);c2=ca;}else{c2=tf(bld.gx,bld.gy);c1=ca;}}}
     }
-    if(Math.max(c1[0],c2[0])<-M||Math.min(c1[0],c2[0])>W+M||Math.max(c1[1],c2[1])<-M||Math.min(c1[1],c2[1])>H+M)continue;
-    const key=l.r+"|"+a+"|"+lw;
-    let g=eg.get(key);if(!g){g={b:new Batch(),col:RCOL[l.r],a,lw};eg.set(key,g);}
-    const path=g.b.next();path.moveTo(c1[0],c1[1]);path.lineTo(c2[0],c2[1]);
+    ctx.globalAlpha=a;ctx.strokeStyle=RCOL[l.r];ctx.lineWidth=lw;
+    ctx.beginPath();ctx.moveTo(c1[0],c1[1]);ctx.lineTo(c2[0],c2[1]);ctx.stroke();
   }
-  for(const g of eg.values()){ctx.globalAlpha=g.a;ctx.strokeStyle=g.col;ctx.lineWidth=g.lw;g.b.stroke(ctx);}
-  for(const d of dots.values()){ctx.globalAlpha=d.a;ctx.fillStyle=RCOL.ROAD_LINK;d.b.fill(ctx);}
   ctx.globalAlpha=1;
-  // 노드 — (색·알파·반지름)별 Path2D로 묶어 fill, 선택/호버 노드만 개별 그림
-  const kz=Math.max(.7,Math.min(1.8,Math.sqrt(tr.k))),ng=new Map(),singles=[];
+  // 노드
   for(const n of DATA.nodes){
-    if(!dotVisible(n))continue;
+    if(!vis(n))continue;
+    if(mode==="geo"&&(n.l==="Road"||n.l==="Water"||n.l==="Rail"||n.l==="Area"||n.l==="Building"))continue;
     let a=1;if(n.l==="Building"||n.l==="Entrance")a*=lod;
     if(sel){if(sel.has(n.id)){const h=sel.get(n.id);a=h===0?1:Math.max(.18,1-h*.30);}else a=.05;}
     const p=pos(n),c=tf(p[0],p[1]),isRoot=sel&&sel.get(n.id)===0;
-    let r=RADIUS[n.l]*kz;if(isRoot)r=Math.max(r+5,8);
-    if(c[0]<-r-6||c[0]>W+r+6||c[1]<-r-6||c[1]>H+r+6)continue;
-    const fill=isPed(n)?"#2f7d5c":COL[n.l];
-    if(isRoot){singles.push({c,r,a,fill});continue;}
-    const key=fill+"|"+a.toFixed(3)+"|"+r.toFixed(2);
-    let g=ng.get(key);if(!g){g={b:new Batch(),fill,a};ng.set(key,g);}
-    const path=g.b.next();path.moveTo(c[0]+r,c[1]);path.arc(c[0],c[1],r,0,7);
-  }
-  for(const g of ng.values()){ctx.globalAlpha=g.a;ctx.fillStyle=g.fill;g.b.fill(ctx);}
-  for(const {c,r,a,fill} of singles){
-    ctx.globalAlpha=a;ctx.fillStyle=fill;
+    let r=RADIUS[n.l]*Math.max(.7,Math.min(1.8,Math.sqrt(tr.k)));if(isRoot)r=Math.max(r+5,8);
+    ctx.globalAlpha=a;ctx.fillStyle=isPed(n)?"#2f7d5c":COL[n.l];
     ctx.beginPath();ctx.arc(c[0],c[1],r,0,7);ctx.fill();
-    // 선택 노드: 바깥 펄스 링 + 굵은 흰 테두리로 확실히 도드라지게
-    ctx.globalAlpha=1;
-    ctx.strokeStyle="#dc2626";ctx.lineWidth=3.5;ctx.beginPath();ctx.arc(c[0],c[1],r+1.5,0,7);ctx.stroke();
-    ctx.strokeStyle="rgba(220,38,38,0.35)";ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(c[0],c[1],r+5,0,7);ctx.stroke();
+    if(isRoot){
+      // 선택 노드: 바깥 펄스 링 + 굵은 흰 테두리로 확실히 도드라지게
+      ctx.globalAlpha=1;
+      ctx.strokeStyle="#dc2626";ctx.lineWidth=3.5;ctx.beginPath();ctx.arc(c[0],c[1],r+1.5,0,7);ctx.stroke();
+      ctx.strokeStyle="rgba(220,38,38,0.35)";ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(c[0],c[1],r+5,0,7);ctx.stroke();
+    }
+    else if(n===hover){ctx.strokeStyle="#272424";ctx.lineWidth=1.5;ctx.stroke();}
   }
   ctx.globalAlpha=1;
 }
@@ -491,20 +436,16 @@ function inPolyLL(lat,lon,pts){let ins=false,n=pts.length,j=n-1;
   for(let i=0;i<n;i++){const yi=pts[i][0],xi=pts[i][1],yj=pts[j][0],xj=pts[j][1];
     if(((yi>lat)!==(yj>lat))&&(lon<(xj-xi)*(lat-yi)/(yj-yi+1e-20)+xi))ins=!ins;j=i;}return ins;}
 
-// 노드 탐색 — 월드 좌표 quadtree, 위치/표시 상태가 바뀌면 무효화 후 지연 재구성
-let qt=null;
-function invalidatePick(){qt=null;}
-const pickable=dotVisible;
 function pick(px,py){
-  if(!qt)qt=d3.quadtree().x(n=>pos(n)[0]).y(n=>pos(n)[1]).addAll(DATA.nodes.filter(pickable));
-  const wx=(px-tr.x)/tr.k,wy=(py-tr.y)/tr.k;
-  let best=qt.find(wx,wy,13/tr.k)||null,bd=13;
-  if(best){const p=pos(best),c=tf(p[0],p[1]);bd=Math.hypot(px-c[0],py-c[1]);}
+  let best=null,bd=13;
+  for(const n of DATA.nodes){
+    if(!vis(n))continue;
+    if(mode==="geo"&&(n.l==="Road"||n.l==="Water"||n.l==="Rail"||n.l==="Area"||n.l==="Building"))continue;
+    const p=pos(n),c=tf(p[0],p[1]),d=Math.hypot(px-c[0],py-c[1]);if(d<bd){bd=d;best=n;}}
   if(mode==="geo"&&nlabelOn.Road){
-    let rbd=8,rb=null;const wm=8/tr.k;
+    let rbd=8,rb=null;
     for(const rl of DATA.road_lines){
       if(rl.p?!roadKind.ped:!roadKind.veh)continue;
-      if(!boxHas(rl.wb,wx,wy,wm))continue;
       for(let i=0;i<rl.pts.length-1;i++){
         const a=tf(lonX(rl.pts[i][1]),latY(rl.pts[i][0])),b=tf(lonX(rl.pts[i+1][1]),latY(rl.pts[i+1][0]));
         const d=ptSeg(px,py,a[0],a[1],b[0],b[1]);if(d<rbd){rbd=d;rb=rl.r;}}}
@@ -516,9 +457,9 @@ function pick(px,py){
     const lat=la0+(.5-((py-tr.y)/tr.k/900))*(la1-la0);
     // 0) testbed 경계선(테두리) 근처 클릭 → testbed 우선 (건물로 꽉 차도 테두리로 선택 가능)
     if(showTb){
-      let tbd=10,tbr=null;const wm=10/tr.k;
+      let tbd=10,tbr=null;
       for(const z of DATA.zone_poly){
-        if(z.k!=="testbed"||!boxHas(z.wb,wx,wy,wm))continue;
+        if(z.k!=="testbed")continue;
         for(let i=0;i<z.pts.length;i++){
           const j=(i+1)%z.pts.length;
           const a=tf(lonX(z.pts[i][1]),latY(z.pts[i][0])),b=tf(lonX(z.pts[j][1]),latY(z.pts[j][0]));
@@ -528,14 +469,15 @@ function pick(px,py){
     // 1) 건물 footprint
     if(!best&&nlabelOn.Building){
       for(const fp of DATA.bld_fp){
-        if(boxHas(fp.wb,wx,wy,0)&&inPolyLL(lat,lon,fp.pts)){const b=byId.get(fp.r);if(b)return b;}}}
+        if(inPolyLL(lat,lon,fp.pts)){const b=byId.get(fp.r);if(b)return b;}}}
     // 2) Area 폴리곤 (건물 없는 빈 영역 클릭 시 — 가장 작은 영역)
     if(!best&&nlabelOn.Area){
       let bestArea=null,bestSize=Infinity;
       for(const z of DATA.zone_poly){
         if(z.k==="testbed"&&!showTb)continue;
-        if(boxHas(z.wb,wx,wy,0)&&inPolyLL(lat,lon,z.pts)){
-          const sz=(z.wb[2]-z.wb[0])*(z.wb[3]-z.wb[1]);
+        if(inPolyLL(lat,lon,z.pts)){
+          const xs=z.pts.map(p=>p[1]),ys=z.pts.map(p=>p[0]);
+          const sz=(Math.max(...xs)-Math.min(...xs))*(Math.max(...ys)-Math.min(...ys));
           if(sz<bestSize){bestSize=sz;bestArea=z.r;}}}
       if(bestArea)return byId.get(bestArea);
     }
@@ -633,7 +575,7 @@ function buildSide(){
     }
   }
   nl.innerHTML=nhtml;
-  nl.querySelectorAll("[data-n]").forEach(el=>el.onclick=()=>{const k=el.dataset.n;nlabelOn[k]=!nlabelOn[k];el.classList.toggle("off",!nlabelOn[k]);el.setAttribute("aria-pressed",nlabelOn[k]?"true":"false");el.animate([{transform:"scale(.93)"},{transform:"scale(1)"}],{duration:130});if(k==="Road")buildSide();invalidatePick();requestRender();});
+  nl.querySelectorAll("[data-n]").forEach(el=>el.onclick=()=>{const k=el.dataset.n;nlabelOn[k]=!nlabelOn[k];el.classList.toggle("off",!nlabelOn[k]);el.setAttribute("aria-pressed",nlabelOn[k]?"true":"false");el.animate([{transform:"scale(.93)"},{transform:"scale(1)"}],{duration:130});if(k==="Road")buildSide();requestRender();});
   nl.querySelectorAll("[data-rk]").forEach(el=>el.onclick=()=>{const k=el.dataset.rk;roadKind[k]=!roadKind[k];el.classList.toggle("off",!roadKind[k]);el.setAttribute("aria-pressed",roadKind[k]?"true":"false");el.animate([{transform:"scale(.93)"},{transform:"scale(1)"}],{duration:130});requestRender();});
   const rl=document.getElementById("rlist");
   const rcount={};links.forEach(l=>rcount[l.r]=(rcount[l.r]||0)+1);
@@ -668,9 +610,9 @@ cv.addEventListener("mousedown",e=>{const r=cv.getBoundingClientRect();const mx=
   panStart=[mx-tr.x,my-tr.y];});
 cv.addEventListener("mousemove",e=>{const r=cv.getBoundingClientRect();const mx=e.clientX-r.left,my=e.clientY-r.top;
   if(down&&Math.hypot(mx-down[0],my-down[1])>=4)moved=true;
-  if(drag){const k=tr.k;drag.fx=(mx-tr.x)/k;drag.fy=(my-tr.y)/k;noteInput(performance.now());}
-  else if(down&&moved){panning=true;tr.x=mx-panStart[0];tr.y=my-panStart[1];noteInput(performance.now());requestView();}
-  else if(!tween){const h=pick(mx,my);if(h!==hover){hover=h;cv.style.cursor=h?"pointer":"grab";requestView();}}});
+  if(drag){const k=tr.k;drag.fx=(mx-tr.x)/k;drag.fy=(my-tr.y)/k;}
+  else if(down&&moved){panning=true;tr.x=mx-panStart[0];tr.y=my-panStart[1];requestRender();}
+  else if(!tween){const h=pick(mx,my);if(h!==hover){hover=h;cv.style.cursor=h?"pointer":"grab";requestRender();}}});
 window.addEventListener("mouseup",e=>{const r=cv.getBoundingClientRect();const mx=e.clientX-r.left,my=e.clientY-r.top;
   if(drag){drag.fx=null;drag.fy=null;if(localSim)localSim.alphaTarget(0);
     if(!moved)selectNode(drag);drag=null;}
@@ -678,7 +620,7 @@ window.addEventListener("mouseup",e=>{const r=cv.getBoundingClientRect();const m
   down=null;panning=false;moved=false;});
 cv.addEventListener("wheel",e=>{e.preventDefault();const r=cv.getBoundingClientRect();const mx=e.clientX-r.left,my=e.clientY-r.top;
   const f=e.deltaY<0?1.15:.87,nk=Math.max(.05,Math.min(60,tr.k*f));
-  tr.x=mx-(mx-tr.x)*(nk/tr.k);tr.y=my-(my-tr.y)*(nk/tr.k);tr.k=nk;noteInput(performance.now());requestView();},{passive:false});
+  tr.x=mx-(mx-tr.x)*(nk/tr.k);tr.y=my-(my-tr.y)*(nk/tr.k);tr.k=nk;requestRender();},{passive:false});
 
 buildSide();buildLegend();resize();fitView();requestRender();requestAnimationFrame(()=>{resize();fitView();requestRender();});
 </script></body></html>
